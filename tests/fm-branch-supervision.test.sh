@@ -101,7 +101,7 @@ PY
     *) fail "a later append disturbed earlier store bytes" ;;
   esac
 
-  printf '{"seq":4' >> "$store"
+  printf '{"seq":4,"epoch":' >> "$store"
   snapshot=$(cat "$store")
   out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
     --task task-5 --verdict captain --summary 'must remain unrecorded' 2>&1)

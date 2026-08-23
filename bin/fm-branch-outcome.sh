@@ -77,8 +77,15 @@ read_cursor() {
 last_seq() {
   local value
   [ -s "$STORE" ] || { printf '0\n'; return 0; }
-  value=$(tail -n 1 "$STORE" 2>/dev/null | sed -n 's/^{"seq":\([0-9]*\),.*/\1/p')
-  [ -n "$value" ] || return 1
+  value=$(tail -n 1 "$STORE" 2>/dev/null | jq -er '
+    select(type == "object")
+    | select(keys == ["epoch", "seq", "summary", "task", "verdict", "wake"])
+    | select((.seq | type) == "number" and .seq >= 1 and .seq == (.seq | floor))
+    | select((.epoch | type) == "number" and .epoch >= 0 and .epoch == (.epoch | floor))
+    | select((.task | type) == "string" and (.wake | type) == "string")
+    | select((.summary | type) == "string" and (.verdict == "routine" or .verdict == "captain"))
+    | .seq
+  ') || return 1
   printf '%s\n' "$value"
 }
 
