@@ -325,6 +325,48 @@ SH
   pass "concurrent stale-lease claims serialize so exactly one actor succeeds"
 }
 
+test_guard_stale_clear_cannot_delete_a_new_claim() {
+  local home fakebin real_rm guard_pid claim_pid guard_status claim_status out
+  home="$TMP_ROOT/guard-claim-race-home"
+  fakebin="$TMP_ROOT/guard-claim-race-bin"
+  mkdir -p "$home/state" "$fakebin"
+  printf '%s\n' "$$" > "$home/state/.lock"
+  printf 'main\t999999\t123\n' > "$home/state/.lease-task-race"
+  real_rm=$(command -v rm)
+  cat > "$fakebin/rm" <<'SH'
+#!/usr/bin/env bash
+last=${!#}
+if [ "$last" = "$FM_TEST_STALE_PATH" ] && mkdir "$FM_TEST_GATE.once" 2>/dev/null; then
+  : > "$FM_TEST_GATE.ready"
+  while [ ! -e "$FM_TEST_GATE.release" ]; do sleep 0.01; done
+fi
+exec "$FM_TEST_REAL_RM" "$@"
+SH
+  chmod +x "$fakebin/rm"
+
+  PATH="$fakebin:$PATH" STATE="$home/state" FM_TEST_REAL_RM="$real_rm" \
+    FM_TEST_STALE_PATH="$home/state/.lease-task-race" FM_TEST_GATE="$home/state/gate" \
+    bash -c '. "$1"; fm_lease_guard task-race "probe"' _ "$ROOT/bin/fm-lease-lib.sh" &
+  guard_pid=$!
+  while [ ! -e "$home/state/gate.ready" ]; do sleep 0.01; done
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_LEASE_HOLDER_PID=$$ \
+    FM_TEST_REAL_RM="$real_rm" FM_TEST_STALE_PATH="$home/state/.lease-task-race" FM_TEST_GATE="$home/state/gate" \
+    "$ROOT/bin/fm-lease.sh" claim task-race --actor branch >/dev/null 2>&1 &
+  claim_pid=$!
+  sleep 0.1
+  : > "$home/state/gate.release"
+  wait "$guard_pid"; guard_status=$?
+  wait "$claim_pid"; claim_status=$?
+  [ "$guard_status" -eq 0 ] || fail "guard stale cleanup failed with $guard_status"
+  [ "$claim_status" -eq 0 ] || fail "serialized claim failed with $claim_status"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-lease.sh" check task-race) || fail "guard deleted the newer lease claim"
+  case "$out" in
+    "branch $$ "*" live") ;;
+    *) fail "newer claim was not preserved as live: $out" ;;
+  esac
+  pass "guard stale cleanup cannot race with or delete a newer lease claim"
+}
+
 test_claim_refuses_the_other_actors_name_loudly() {
   local home out status
   home="$TMP_ROOT/claim-guard-home"
@@ -393,6 +435,7 @@ test_main_owned_actions_refuse_the_branch_actor
 test_home_without_branch_is_untouched
 test_lease_liveness_binds_to_the_session_lock
 test_concurrent_stale_lease_claims_have_one_winner
+test_guard_stale_clear_cannot_delete_a_new_claim
 test_claim_refuses_the_other_actors_name_loudly
 test_release_actor_drops_only_that_actors_leases
 test_branch_cannot_force_teardown_or_directly_relaunch

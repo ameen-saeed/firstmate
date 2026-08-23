@@ -134,10 +134,13 @@ function pidAlive(pid: string): boolean {
   }
 }
 
+let ownedLockPid = "";
+
 // Same ownership read as the watcher extension's lockOwnership(): the lock
 // names the harness pid, and this process owns it when that pid appears in
 // its own ancestry.
 function lockOwnership(): LockOwnership {
+  ownedLockPid = "";
   let lockPid = "";
   try {
     lockPid = readFileSync(`${state}/.lock`, "utf8").trim();
@@ -147,7 +150,10 @@ function lockOwnership(): LockOwnership {
   if (!/^[0-9]+$/.test(lockPid) || lockPid === "1") return "other";
   let pid = String(process.pid);
   for (let i = 0; i < 8; i += 1) {
-    if (pid === lockPid) return "owned";
+    if (pid === lockPid) {
+      ownedLockPid = lockPid;
+      return "owned";
+    }
     pid = parentPid(pid);
     if (!pid || pid === "1") break;
   }
@@ -264,7 +270,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   // A replaced branch conversation must not leave its per-task leases behind
-  // (the holder pid - this process - is still alive, so the sweep alone would
+  // (the session-lock holder pid is still alive, so the sweep alone would
   // keep them). One bulk release per generation, at activation.
   function releaseBranchLeases(): void {
     try {
@@ -436,6 +442,8 @@ export default function (pi: ExtensionAPI) {
       ],
     });
     await loader.reload();
+    if (lockOwnership() !== "owned") throw new Error("supervision session no longer owns the fleet lock");
+    const leaseHolderPid = ownedLockPid;
     const bashTool = createBashToolDefinition(fmRoot, {
       spawnHook: (context) => ({
         ...context,
@@ -452,7 +460,7 @@ ${context.command}
           ...context.env,
           ...scriptEnv,
           FM_SUPERVISION_ACTOR: "branch",
-          FM_LEASE_HOLDER_PID: String(process.pid),
+          FM_LEASE_HOLDER_PID: leaseHolderPid,
         },
       }),
     });

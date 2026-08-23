@@ -63,6 +63,13 @@
 # unconfirmed submit (3): recognizable as "the other supervision actor holds
 # this task right now - retry after the lease clears".
 FM_LEASE_REFUSE_EXIT=6
+FM_LEASE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+fm_lease_lock_helpers() {
+  command -v fm_lock_acquire_wait >/dev/null 2>&1 && return 0
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$FM_LEASE_LIB_DIR/fm-wake-lib.sh"
+}
 
 # fm_lease_actor: print the current actor after validating it. Returns 1 (with
 # stderr) for an unknown FM_SUPERVISION_ACTOR value.
@@ -143,12 +150,22 @@ fm_lease_clear_stale() {
 # a live lease held by the OTHER actor exists for <task>. Passes silently
 # otherwise. Call after the task id is resolved and before the first mutation.
 fm_lease_guard() {
-  local task=$1 action=$2 actor
+  local task=$1 action=$2 actor lock lease_actor
   fm_lease_valid_id "$task" || return 0
   actor=$(fm_lease_actor) || exit "$FM_LEASE_REFUSE_EXIT"
-  fm_lease_live "$task" || { fm_lease_clear_stale "$task"; return 0; }
-  [ "$FM_LEASE_ACTOR" != "$actor" ] || return 0
-  echo "error: $action refused - task '$task' is leased to the $FM_LEASE_ACTOR supervision actor (state/.lease-$task); retry after it releases, or clear a wedged lease with bin/fm-lease.sh release $task --actor $FM_LEASE_ACTOR" >&2
+  [ -e "$(fm_lease_path "$task")" ] || return 0
+  fm_lease_lock_helpers
+  lock="$STATE/.fm-lease-command.lock"
+  fm_lock_acquire_wait "$lock"
+  if ! fm_lease_live "$task"; then
+    fm_lease_clear_stale "$task" || { fm_lock_release "$lock"; return 1; }
+    fm_lock_release "$lock"
+    return 0
+  fi
+  lease_actor=$FM_LEASE_ACTOR
+  fm_lock_release "$lock"
+  [ "$lease_actor" != "$actor" ] || return 0
+  echo "error: $action refused - task '$task' is leased to the $lease_actor supervision actor (state/.lease-$task); retry after it releases, or clear a wedged lease with bin/fm-lease.sh release $task --actor $lease_actor" >&2
   exit "$FM_LEASE_REFUSE_EXIT"
 }
 

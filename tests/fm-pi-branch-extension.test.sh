@@ -248,7 +248,9 @@ test_branch_dispatch_two_stage_filter_and_prefix_contract() {
 const prelude = process.env.DRIVER_PRELUDE;
 await eval(`(async () => { ${prelude}; globalThis.__t = { pi, fire, dispatch, settle, outcomeScript, sentToMain, mainUserMessages, mainTools, renderers, home, realRoot }; })()`);
 const { fire, dispatch, settle, outcomeScript, sentToMain, mainUserMessages, mainTools, renderers, home, realRoot } = globalThis.__t;
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
+
+writeFileSync(`${home}/state/.lock`, `${process.ppid}\n`);
 
 // 1. An accepted wake reaches the branch session, never main.
 const offer = dispatch("signal: task-9 done: PR https://example.com/pr/9 checks green");
@@ -278,7 +280,7 @@ if (loader.options.systemPrompt.length < 4096) throw new Error("branch prompt is
 const bashTool = session.options.customTools.find((tool) => tool.name === "bash");
 const hooked = bashTool.__options.spawnHook({ command: "true", cwd: "/x", env: { PATH: "/bin" } });
 if (hooked.env.FM_SUPERVISION_ACTOR !== "branch") throw new Error("branch bash does not inject the branch actor");
-if (!/^[0-9]+$/.test(String(hooked.env.FM_LEASE_HOLDER_PID))) throw new Error("branch bash does not pin the lease holder pid");
+if (hooked.env.FM_LEASE_HOLDER_PID !== String(process.ppid)) throw new Error("branch bash does not pin the verified session-lock holder pid");
 
 // 3. Shared per-home prompt_cache_key: overrides only payloads that already
 // carry one, stable within the home.
