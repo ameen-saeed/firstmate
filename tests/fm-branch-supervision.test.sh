@@ -267,6 +267,8 @@ test_home_without_branch_is_untouched() {
 
   printf '%s\n' "$PPID" > "$home/state/.lock"
   printf 'branch\t%s\t123\n' "$PPID" > "$home/state/.lease-task-reused"
+  # The positional parameter belongs to the nested shell.
+  # shellcheck disable=SC2016
   out=$(env -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR CLAUDECODE=1 STATE="$home/state" bash -c '. "$1"; fm_lease_guard task-reused "probe"; echo silent-pass' _ "$ROOT/bin/fm-lease-lib.sh" 2>&1)
   [ "$out" = "silent-pass" ] || fail "guard helpers honored a reused-pid Pi lease in a Claude context: $out"
   [ ! -e "$home/state/.lease-task-reused" ] || fail "Claude context kept a Pi lease whose old pid matched its current lock"
