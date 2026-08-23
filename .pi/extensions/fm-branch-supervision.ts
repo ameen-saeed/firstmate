@@ -19,9 +19,9 @@
 // before_provider_request hook - main keeps Pi's default per-session key.
 // Wakes, mirrored dialog, and merge notes are all appends at a tail.
 //
-// Session-lock ownership: every acting boundary (wake acceptance, mirror
-// collection, marker writes, lease cleanup) re-evaluates lock ownership
-// LAZILY, the same way the watcher extension evaluates it at arm time. A cold
+// Session-lock ownership: every branch side-effect boundary re-evaluates the
+// current extension generation and lock ownership LAZILY, the same way the
+// watcher extension evaluates ownership at arm time. A cold
 // Pi start acquires the lock only when the session runs fm-session-start.sh,
 // so latching ownership once at session_start would leave the branch inert
 // for the whole process; and a secondary read-only Pi session that never owns

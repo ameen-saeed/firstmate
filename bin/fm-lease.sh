@@ -5,7 +5,8 @@
 # is owned by bin/fm-lease-lib.sh; this is the command surface the two
 # supervision actors use around the overlap set (steering, stopping, cleanup,
 # backlog status, stuck-worker recovery). "backlog" is the reserved resource
-# id for the whole-file guard around data/backlog.md writes.
+# the branch prompt claims around its own backlog writes; main's tasks-axi path
+# is deliberately unguarded in this scope.
 #
 # Usage:
 #   fm-lease.sh claim <task> [--actor main|branch]
@@ -118,8 +119,8 @@ case "$CMD" in
     fi
     # The lease outlives this CLI call, so its liveness pid must be the
     # long-lived supervising process: FM_LEASE_HOLDER_PID when the caller
-    # provides one (the Pi branch extension passes its own process pid), else
-    # the session-lock holder (state/.lock is the harness pid), else this
+    # provides one (the Pi branch extension passes the session-lock holder),
+    # else the session-lock holder (state/.lock is the harness pid), else this
     # shell; without a matching session lock the resulting lease is stale.
     HOLDER_PID=${FM_LEASE_HOLDER_PID:-}
     case "$HOLDER_PID" in *[!0-9]*) HOLDER_PID= ;; esac

@@ -14,8 +14,8 @@
 # CONTRACT.
 #   - Lease file: $STATE/.lease-<task>, one line "<actor>\t<pid>\t<epoch>".
 #     Written atomically (temp + ln for claim, temp + mv for a same-actor
-#     refresh); a claim races only against the sibling actor in the same pi
-#     process, never against another firstmate home.
+#     refresh), with inspection and mutation serialized by the home-local
+#     lease-command lock; leases never coordinate across firstmate homes.
 #   - Actors: exactly "main" and "branch". The current actor is
 #     $FM_SUPERVISION_ACTOR when set, else "main". The branch's shell gets
 #     FM_SUPERVISION_ACTOR=branch injected deterministically by the Pi branch
@@ -51,8 +51,10 @@
 #   - Role partition (fm_lease_forbid_branch): actions MAIN alone owns -
 #     merging a PR, landing local-only work, spawning workers - refuse the
 #     branch actor outright, lease or no lease.
-#   - "backlog" is a reserved claimable resource name: the whole-file guard
-#     around data/backlog.md writes, claimed the same way a task is.
+#   - "backlog" is a reserved claimable resource name used by the branch
+#     prompt around its own data/backlog.md writes. This is deliberately
+#     branch-side containment only; main's tasks-axi path has no executable
+#     backlog lease guard in this scope.
 #
 # Sourced by bin/fm-send.sh, bin/fm-control.sh, bin/fm-teardown.sh,
 # bin/fm-pr-merge.sh, bin/fm-merge-local.sh, bin/fm-spawn.sh, and
