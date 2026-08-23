@@ -118,8 +118,10 @@
 # so fm-send retries the identical leg once - safe because the remote write
 # deduplicates the same request onto the same record - and a still-lost
 # transport exits nonzero while preserving a marked request's reply
-# expectation, since the record may have landed; re-running the send later is
-# equally safe for the same reason. The remote host runs no re-ring ladder of
+# expectation, since the record may have landed. Its error prints the exact
+# FM_PENDING_REPLY_EXISTING_CORR=<id> resend command that preserves the body
+# and makes a later remote enqueue deduplicate onto that same record. The
+# remote host runs no re-ring ladder of
 # its own: a swallowed remote doorbell surfaces through the parent's
 # pending-reply recovery and escalation, whose recovery request re-rings the
 # remote doorbell when it is enqueued.
@@ -171,6 +173,7 @@
 # path do not pay it.
 set -eu
 
+FM_SEND_ORIGINAL_ARGS=("$@")
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
@@ -627,8 +630,15 @@ else
     fm_pending_reply_embed_corr "$MESSAGE" "$PENDING_REPLY_CORR" MESSAGE
     if [ "$PENDING_REPLY_CREATED" != 1 ] \
       && fm_pending_reply_delivery_attempt_unresolved "$STATE" "$PENDING_REPLY_CORR"; then
-      echo "error: pending-reply delivery for $TARGET_TASK_ID is unresolved; refusing to resend correlation $PENDING_REPLY_CORR" >&2
-      exit 1
+      if [ "$TARGET_BACKEND" = remote ]; then
+        if ! fm_pending_reply_reset_known_undelivered "$STATE" "$PENDING_REPLY_CORR"; then
+          echo "error: pending-reply delivery for $TARGET_TASK_ID could not be reset for an idempotent remote resend of correlation $PENDING_REPLY_CORR" >&2
+          exit 1
+        fi
+      else
+        echo "error: pending-reply delivery for $TARGET_TASK_ID is unresolved; refusing to resend correlation $PENDING_REPLY_CORR" >&2
+        exit 1
+      fi
     fi
     if ! fm_pending_reply_prepare_delivery "$STATE" "$PENDING_REPLY_CORR"; then
       [ "$PENDING_REPLY_CREATED" != 1 ] \
@@ -684,10 +694,15 @@ else
         fm_pending_reply_mark_delivery_unknown "$STATE" "$PENDING_REPLY_CORR" || true
       fi
       if [ "$remote_rc" -eq 255 ]; then
-        echo "error: steer to remote secondmate $TARGET_REMOTE_ID is unconfirmed (transport lost twice; remote completion unknown). Re-running this send is safe: the remote inbox stores at most one record for the same request." >&2
+        echo "error: steer to remote secondmate $TARGET_REMOTE_ID is unconfirmed (transport lost twice; remote completion unknown). Only the correlation-reusing resend below is idempotent and lands on the same remote inbox record:" >&2
       else
-        echo "error: steer to remote secondmate $TARGET_REMOTE_ID is unconfirmed (the first transport attempt had unknown completion and the retry failed). Re-running this send is safe: the remote inbox stores at most one record for the same request." >&2
+        echo "error: steer to remote secondmate $TARGET_REMOTE_ID is unconfirmed (the first transport attempt had unknown completion and the retry failed). Only the correlation-reusing resend below is idempotent and lands on the same remote inbox record:" >&2
       fi
+      printf 'FM_PENDING_REPLY_EXISTING_CORR=%q %q' "$PENDING_REPLY_CORR" "$SCRIPT_DIR/fm-send.sh" >&2
+      for resend_arg in "${FM_SEND_ORIGINAL_ARGS[@]}"; do
+        printf ' %q' "$resend_arg" >&2
+      done
+      printf '\n' >&2
       exit 1
     fi
     if [ "$remote_rc" -ne 0 ]; then

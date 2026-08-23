@@ -251,7 +251,7 @@ test_remote_steer_lands_in_remote_inbox() {
 }
 
 test_remote_rerun_is_idempotent() {
-  local dir fb ssh_log home rhome rc err count pend
+  local dir fb ssh_log home rhome rc err count pend corr expected_cmd arg quoted rec
   dir="$TMP_ROOT/remote-idem"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); ssh_log="$dir/ssh.log"; : > "$ssh_log"
   rhome=$(setup_remote_secondmate_home remote-idem)
@@ -270,15 +270,37 @@ test_remote_rerun_is_idempotent() {
   count=$(remote_inbox_records "$rhome" | grep -c . || true)
   [ "$count" = 1 ] \
     || fail "re-running the remote leg must dedup onto one record, found $count:"$'\n'"$(remote_inbox_records "$rhome")"
-  assert_contains "$err" "Re-running this send is safe" \
-    "an unconfirmed remote steer must invite a safe re-run"
+  assert_contains "$err" "Only the correlation-reusing resend below is idempotent" \
+    "an unconfirmed remote steer must limit resend safety to correlation reuse"
   assert_not_contains "$err" "do not resend" \
     "the deleted do-not-resend trap must be gone for an unconfirmed remote steer"
   pend=$(pending_record "$home")
   [ -n "$pend" ] || fail "an unconfirmed remote steer must preserve its expectation for the record that may have landed"
   [ "$(grep '^phase=' "$pend" | tail -1 | cut -d= -f2-)" = delivery_unknown ] \
     || fail "the preserved expectation must record unknown delivery: $(cat "$pend")"
-  pass "fm-send remote: an ambiguous transport retries the identical leg and the remote inbox holds one record"
+  corr=$(fm_pending_reply_get "$pend" corr_id)
+  expected_cmd="FM_PENDING_REPLY_EXISTING_CORR=$corr"
+  for arg in "$SEND" rsm "please rename the metric"; do
+    printf -v quoted '%q' "$arg"
+    expected_cmd="$expected_cmd $quoted"
+  done
+  assert_contains "$err" "$expected_cmd" \
+    "double transport loss must print the exact correlation-reusing resend command"
+
+  rc=0
+  send_env "$fb" "$home" "$ssh_log" FM_PENDING_REPLY_EXISTING_CORR="$corr" \
+    "$SEND" rsm "please rename the metric" >"$dir/resend.out" 2>"$dir/resend.err" || rc=$?
+  expect_code 0 "$rc" "the printed correlation-reusing resend must succeed"
+  count=$(find "$rhome/state/parent-route/rsm.inbox" -name '*.msg' | wc -l | tr -d ' ')
+  [ "$count" = 1 ] || fail "the correlation-reusing resend must leave exactly one remote record, found $count"
+  rec=$(find "$rhome/state/parent-route/rsm.inbox" -name '*.msg' | head -1)
+  grep -F "corr=$corr" "$rec" >/dev/null \
+    || fail "the deduplicated remote record did not preserve correlation $corr"
+  [ -n "$(fm_pending_reply_get "$pend" delivered_epoch)" ] \
+    || fail "the successful resend did not confirm pending-reply delivery: $(cat "$pend")"
+  [ "$(fm_pending_reply_get "$pend" phase)" = awaiting_report ] \
+    || fail "the successful resend did not restore awaiting_report: $(cat "$pend")"
+  pass "fm-send remote: the printed correlation-reusing resend deduplicates onto the same record"
 }
 
 test_remote_retry_failure_preserves_ambiguous_expectation() {
@@ -441,8 +463,8 @@ test_remote_transport_loss_preserves_expectation() {
   [ "$rc" -ne 0 ] || fail "an unknown-completion transport loss must exit nonzero"
   [ "$(cat "$ssh_log.count")" = 2 ] \
     || fail "fm-send must retry the identical remote leg once on ssh 255, got $(cat "$ssh_log.count") attempts"
-  assert_contains "$err" "Re-running this send is safe" \
-    "transport loss must invite a safe re-run instead of forbidding one"
+  assert_contains "$err" "Only the correlation-reusing resend below is idempotent" \
+    "transport loss must print the supported safe resend boundary"
   assert_not_contains "$err" "do not resend" \
     "the deleted do-not-resend trap must be gone for transport loss"
   pend=$(pending_record "$home")
