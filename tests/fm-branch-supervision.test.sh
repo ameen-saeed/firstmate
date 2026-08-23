@@ -107,6 +107,7 @@ PY
 
 test_lease_exclusivity_release_stale_and_sweep() {
   local home out status
+  local -x PI_CODING_AGENT=true
   home="$TMP_ROOT/lease-home"
   mkdir -p "$home/state"
   printf '%s\n' "$$" > "$home/state/.lock"
@@ -155,6 +156,7 @@ test_lease_exclusivity_release_stale_and_sweep() {
 
 test_mutating_scripts_refuse_the_other_actors_lease() {
   local home root out status
+  local -x PI_CODING_AGENT=true
   home="$TMP_ROOT/guard-home"
   root="$TMP_ROOT/guard-root"
   mkdir -p "$home/state" "$root"
@@ -253,13 +255,20 @@ test_home_without_branch_is_untouched() {
   out=$(STATE="$home/state" bash -c '. "$1"; fm_lease_guard task-reused "probe"; fm_lease_forbid_branch "probe"; echo silent-pass' _ "$ROOT/bin/fm-lease-lib.sh" 2>&1)
   [ "$out" = "silent-pass" ] || fail "guard helpers honored a leftover Pi lease in a no-lock Claude home: $out"
   [ ! -e "$home/state/.lease-task-reused" ] || fail "guard kept a leftover Pi lease without a session lock"
-  pass "a non-Pi no-lock home ignores stale Pi markers and leases without refusing guards"
+
+  printf '%s\n' "$PPID" > "$home/state/.lock"
+  printf 'branch\t%s\t123\n' "$PPID" > "$home/state/.lease-task-reused"
+  out=$(env -u PI_CODING_AGENT -u FM_SUPERVISION_ACTOR CLAUDECODE=1 STATE="$home/state" bash -c '. "$1"; fm_lease_guard task-reused "probe"; echo silent-pass' _ "$ROOT/bin/fm-lease-lib.sh" 2>&1)
+  [ "$out" = "silent-pass" ] || fail "guard helpers honored a reused-pid Pi lease in a Claude context: $out"
+  [ ! -e "$home/state/.lease-task-reused" ] || fail "Claude context kept a Pi lease whose old pid matched its current lock"
+  pass "a non-Pi home ignores stale Pi leases even when the recycled pid owns its lock"
 }
 
 # --- session-bound staleness and the loud accidental-override guard ---------
 
 test_lease_liveness_binds_to_the_session_lock() {
   local home out
+  local -x PI_CODING_AGENT=true
   home="$TMP_ROOT/lock-bound-home"
   mkdir -p "$home/state"
 
@@ -290,6 +299,7 @@ test_lease_liveness_binds_to_the_session_lock() {
 
 test_concurrent_stale_lease_claims_have_one_winner() {
   local home fakebin real_mv branch_pid main_pid branch_status main_status
+  local -x PI_CODING_AGENT=true
   home="$TMP_ROOT/concurrent-lease-home"
   fakebin="$TMP_ROOT/concurrent-lease-bin"
   mkdir -p "$home/state" "$fakebin"
@@ -327,6 +337,7 @@ SH
 
 test_guard_stale_clear_cannot_delete_a_new_claim() {
   local home fakebin real_rm guard_pid claim_pid guard_status claim_status out
+  local -x PI_CODING_AGENT=true
   home="$TMP_ROOT/guard-claim-race-home"
   fakebin="$TMP_ROOT/guard-claim-race-bin"
   mkdir -p "$home/state" "$fakebin"
@@ -382,6 +393,7 @@ test_claim_refuses_the_other_actors_name_loudly() {
 
 test_release_actor_drops_only_that_actors_leases() {
   local home
+  local -x PI_CODING_AGENT=true
   home="$TMP_ROOT/release-actor-home"
   mkdir -p "$home/state"
   printf '%s\n' "$$" > "$home/state/.lock"

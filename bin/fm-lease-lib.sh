@@ -25,10 +25,10 @@
 #     session-lock holder, or FM_LEASE_HOLDER_PID - see bin/fm-lease.sh), and
 #     both actors live inside that one pi process, so a dead recorded pid
 #     means the process died; the lease is cleared at the next claim, guard,
-#     or sweep. Liveness requires state/.lock and the recorded pid must BE its
-#     current holder, so a lease left by an exited Pi session goes stale even
-#     if its pid was recycled by an unrelated process, and a non-Pi home never
-#     honors a leftover Pi lease. A lease held by the
+#     or sweep. Liveness requires a Pi calling context plus state/.lock, and
+#     the recorded pid must BE its current holder, so a lease left by an exited
+#     Pi session goes stale even if its pid was recycled by an unrelated
+#     process, and a non-Pi home never honors a leftover Pi lease. A lease held by the
 #     live current session but an abandoned conversation is recovered with
 #     the loud release override in the refusal message.
 #
@@ -123,11 +123,15 @@ fm_lease_read() {
   return 0
 }
 
-# fm_lease_live <task>: 0 iff a well-formed lease exists, its recorded pid is
-# alive, and that pid IS the current session-lock holder (see the staleness
-# contract above).
+# fm_lease_live <task>: 0 iff a well-formed lease exists in a Pi context, its
+# recorded pid is alive, and that pid IS the current session-lock holder (see
+# the staleness contract above).
 fm_lease_live() {
   local lock_pid
+  case "${PI_CODING_AGENT:-}:${FM_SUPERVISION_ACTOR:-}" in
+    true:*|*:main|*:branch) ;;
+    *) return 1 ;;
+  esac
   fm_lease_read "$1" || return 1
   [ -n "$FM_LEASE_ACTOR" ] || return 1
   [ -n "$FM_LEASE_PID" ] || return 1
