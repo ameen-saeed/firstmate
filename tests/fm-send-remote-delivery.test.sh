@@ -100,8 +100,12 @@ SH
 set -u
 cat > /dev/null
 count=$(cat "$FM_SSH_COUNT" 2>/dev/null || echo 0)
-printf '%s\n' "$((count + 1))" > "$FM_SSH_COUNT"
+count=$((count + 1))
+printf '%s\n' "$count" > "$FM_SSH_COUNT"
 printf '%s\n' "$*" >> "$FM_SSH_LOG"
+if [ "${FM_FAKE_SSH_AFTER_AMBIGUOUS_RC:-0}" -ne 0 ] && [ "$count" -gt 1 ]; then
+  exit "$FM_FAKE_SSH_AFTER_AMBIGUOUS_RC"
+fi
 if [ "${FM_FAKE_SSH_RC:-0}" -ne 0 ]; then
   [ -z "${FM_FAKE_SSH_STDERR:-}" ] || printf '%s\n' "$FM_FAKE_SSH_STDERR" >&2
   exit "${FM_FAKE_SSH_RC}"
@@ -120,7 +124,8 @@ cmd=${rargs[0]}
 rc=0
 env FM_HOME="$remote_home" FM_ROOT_OVERRIDE="$FM_REMOTE_CODE_ROOT" \
   "$FM_REMOTE_CODE_ROOT/bin/$cmd" "${rargs[@]:1}" || rc=$?
-if [ "${FM_FAKE_SSH_AMBIGUOUS:-0}" = 1 ]; then
+if [ "${FM_FAKE_SSH_AMBIGUOUS:-0}" = 1 ] \
+  || { [ "${FM_FAKE_SSH_AFTER_AMBIGUOUS_RC:-0}" -ne 0 ] && [ "$count" -eq 1 ]; }; then
   exit 255
 fi
 exit "$rc"
@@ -274,6 +279,63 @@ test_remote_rerun_is_idempotent() {
   [ "$(grep '^phase=' "$pend" | tail -1 | cut -d= -f2-)" = delivery_unknown ] \
     || fail "the preserved expectation must record unknown delivery: $(cat "$pend")"
   pass "fm-send remote: an ambiguous transport retries the identical leg and the remote inbox holds one record"
+}
+
+test_remote_retry_failure_preserves_ambiguous_expectation() {
+  local dir fb ssh_log home rhome rc err pend
+  dir="$TMP_ROOT/remote-ambiguous-then-fail"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); ssh_log="$dir/ssh.log"; : > "$ssh_log"
+  rhome=$(setup_remote_secondmate_home remote-ambiguous-then-fail)
+  home=$(setup_remote_parent_home remote-ambiguous-then-fail "$rhome")
+
+  rc=0
+  send_env "$fb" "$home" "$ssh_log" FM_FAKE_SSH_AFTER_AMBIGUOUS_RC=1 \
+    "$SEND" rsm "please rename the metric" >"$dir/out" 2>"$dir/err" || rc=$?
+  err=$(cat "$dir/err")
+  [ "$rc" -ne 0 ] || fail "a failed retry after unknown completion must not claim delivery"
+  assert_contains "$err" "first transport attempt had unknown completion" \
+    "the final error must retain the first attempt's ambiguous completion"
+  pend=$(pending_record "$home")
+  [ -n "$pend" ] || fail "an ambiguous first attempt must preserve its expectation when the retry fails"
+  [ "$(grep '^phase=' "$pend" | tail -1 | cut -d= -f2-)" = delivery_unknown ] \
+    || fail "the ambiguous expectation must remain delivery_unknown after a failed retry: $(cat "$pend")"
+  [ "$(remote_inbox_records "$rhome" | grep -c . || true)" = 1 ] \
+    || fail "the first attempt's durable record must remain the sole remote record"
+  pass "fm-send remote: a failed retry cannot erase an earlier ambiguous delivery"
+}
+
+test_remote_send_revalidates_after_retirement_lock() {
+  local dir rhome meta lock ready release rc sender_pid holder_pid
+  dir="$TMP_ROOT/remote-retire-race"; mkdir -p "$dir"
+  rhome=$(setup_remote_secondmate_home remote-retire-race)
+  meta="$rhome/state/parent-route/rsm.meta"
+  lock="$rhome/state/parent-route/.meta-rsm.lock"
+  ready="$dir/lock-ready"
+  release="$dir/release-lock"
+  FM_STATE_OVERRIDE="$rhome/state/parent-route" bash -c '
+    . "$1"
+    fm_task_inbox_lock_acquire "$2" || exit 91
+    : > "$3"
+    while [ ! -e "$4" ]; do sleep 0.05; done
+    rm -f "$5"
+    fm_lock_release "$2"
+  ' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$lock" "$ready" "$release" "$meta" &
+  holder_pid=$!
+  while [ ! -e "$ready" ]; do kill -0 "$holder_pid" 2>/dev/null || fail "metadata-lock holder exited early"; sleep 0.05; done
+
+  rc=0
+  env FM_HOME="$rhome" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-remote-secondmate-control.sh" send rsm "retirement-race steer" \
+    >"$dir/out" 2>"$dir/err" &
+  sender_pid=$!
+  sleep 0.2
+  : > "$release"
+  wait "$sender_pid" || rc=$?
+  wait "$holder_pid" || fail "metadata-lock holder failed"
+  [ "$rc" -ne 0 ] || fail "a send must not enqueue after endpoint retirement won the metadata lock"
+  [ -z "$(remote_inbox_records "$rhome")" ] \
+    || fail "a send re-created an orphan inbox after endpoint retirement"
+  pass "remote control: send revalidates endpoint ownership under the metadata lock"
 }
 
 test_remote_resolve_key_closes_at_enqueue() {
@@ -470,6 +532,8 @@ test_local_pending_does_not_close_resolve_key() {
 
 test_remote_steer_lands_in_remote_inbox
 test_remote_rerun_is_idempotent
+test_remote_retry_failure_preserves_ambiguous_expectation
+test_remote_send_revalidates_after_retirement_lock
 test_remote_resolve_key_closes_at_enqueue
 test_remote_slash_rides_inbox
 test_remote_real_failure_still_fails

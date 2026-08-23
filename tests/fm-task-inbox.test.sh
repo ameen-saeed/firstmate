@@ -192,6 +192,34 @@ test_idempotent_write_dedups_exact_body() {
   pass "inbox: the idempotent enqueue dedups an exact re-run onto the same record, handled or not"
 }
 
+test_idempotent_write_follows_concurrent_ack() {
+  local state rec result count text
+  state="$TMP_ROOT/idem-ack-race/state"; mkdir -p "$state"
+  text="acknowledge while dedup scans"
+  rec=$(inbox_lib "$state" fm_task_inbox_write_idempotent "$state" t1 "$text") \
+    || fail "race fixture write failed"
+  result=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    eval "$(declare -f fm_task_inbox_body | sed "1s/fm_task_inbox_body/_original_fm_task_inbox_body/")"
+    fm_task_inbox_body() {
+      candidate=$1
+      case "$candidate" in
+        */handled/*) ;;
+        *) mv "$candidate" "${candidate%/*}/handled/" || return 1
+           candidate="${candidate%/*}/handled/${candidate##*/}" ;;
+      esac
+      _original_fm_task_inbox_body "$candidate"
+    }
+    fm_task_inbox_write_idempotent "$2" t1 "$3"
+  ' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$state" "$text") \
+    || fail "idempotent enqueue failed while acknowledgement moved its candidate"
+  [ "$result" = "$state/t1.inbox/handled/${rec##*/}" ] \
+    || fail "dedup did not follow the concurrently acknowledged record: $result"
+  count=$(find "$state/t1.inbox" -name '*.msg' | wc -l | tr -d ' ')
+  [ "$count" = 1 ] || fail "acknowledgement racing dedup created a duplicate record"
+  pass "inbox: idempotent enqueue follows a record concurrently moved to handled"
+}
+
 test_handled_mv_dedups_by_sequence() {
   local state r1 r2 oldest r3
   state="$TMP_ROOT/dedup/state"; mkdir -p "$state"
@@ -453,6 +481,7 @@ test_watcher_escalates_once_after_budget() {
 
 test_write_is_durable_and_exact
 test_idempotent_write_dedups_exact_body
+test_idempotent_write_follows_concurrent_ack
 test_handled_mv_dedups_by_sequence
 test_concurrent_writers_never_clobber
 test_ladder_writes_ignore_vanished_inbox

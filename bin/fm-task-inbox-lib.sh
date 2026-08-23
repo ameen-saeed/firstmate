@@ -186,9 +186,26 @@ fm_task_inbox_write_idempotent() {  # <state-dir> <task-id> <text>
   if want=$(mktemp "$dir/.dedup.XXXXXX") && have=$(mktemp "$dir/.dedup.XXXXXX"); then
     if printf '%s' "$text" > "$want"; then
       for f in "$dir"/*.msg "$dir/handled"/*.msg; do
-        [ -e "$f" ] || continue
-        fm_task_inbox_body "$f" > "$have" 2>/dev/null || continue
+        if [ ! -e "$f" ]; then
+          case "$f" in
+            "$dir"/*.msg)
+              f="$dir/handled/${f##*/}"
+              [ -e "$f" ] || continue
+              ;;
+            *) continue ;;
+          esac
+        fi
+        if ! fm_task_inbox_body "$f" > "$have" 2>/dev/null; then
+          case "$f" in
+            "$dir"/*.msg)
+              f="$dir/handled/${f##*/}"
+              fm_task_inbox_body "$f" > "$have" 2>/dev/null || continue
+              ;;
+            *) continue ;;
+          esac
+        fi
         cmp -s "$want" "$have" || continue
+        [ ! -e "$dir/handled/${f##*/}" ] || f="$dir/handled/${f##*/}"
         rec=$f
         break
       done

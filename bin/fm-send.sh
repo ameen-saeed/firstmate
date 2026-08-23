@@ -670,18 +670,24 @@ else
     # 255 is safe by that idempotence; a still-lost transport preserves a
     # marked request's reply expectation because the record may have landed.
     remote_rc=0
+    remote_completion_unknown=0
     "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh send \
       "$TARGET_REMOTE_ID" "$MESSAGE" < /dev/null || remote_rc=$?
     if [ "$remote_rc" -eq 255 ]; then
+      remote_completion_unknown=1
       remote_rc=0
       "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh send \
         "$TARGET_REMOTE_ID" "$MESSAGE" < /dev/null || remote_rc=$?
     fi
-    if [ "$remote_rc" -eq 255 ]; then
+    if [ "$remote_rc" -ne 0 ] && [ "$remote_completion_unknown" -eq 1 ]; then
       if [ -n "$PENDING_REPLY_CORR" ]; then
         fm_pending_reply_mark_delivery_unknown "$STATE" "$PENDING_REPLY_CORR" || true
       fi
-      echo "error: steer to remote secondmate $TARGET_REMOTE_ID is unconfirmed (transport lost twice; remote completion unknown). Re-running this send is safe: the remote inbox stores at most one record for the same request." >&2
+      if [ "$remote_rc" -eq 255 ]; then
+        echo "error: steer to remote secondmate $TARGET_REMOTE_ID is unconfirmed (transport lost twice; remote completion unknown). Re-running this send is safe: the remote inbox stores at most one record for the same request." >&2
+      else
+        echo "error: steer to remote secondmate $TARGET_REMOTE_ID is unconfirmed (the first transport attempt had unknown completion and the retry failed). Re-running this send is safe: the remote inbox stores at most one record for the same request." >&2
+      fi
       exit 1
     fi
     if [ "$remote_rc" -ne 0 ]; then

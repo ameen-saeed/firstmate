@@ -186,10 +186,17 @@ cmd_launch() {
 }
 
 cmd_send() {
-  local id=$1 message=$2 rec ring_rc=0
+  local id=$1 message=$2 rec ring_rc=0 meta meta_lock
   validate_id "$id"
   validate_home "$id"
-  remote_endpoint_require "$id"
+  meta=$(meta_path "$id")
+  meta_lock=$(fm_meta_lock_path "$meta") || die "remote secondmate metadata lock path is invalid"
+  fm_task_inbox_lock_acquire "$meta_lock" \
+    || die "remote secondmate endpoint metadata could not be locked for final delivery validation"
+  if ! remote_endpoint_load "$id"; then
+    fm_lock_release "$meta_lock"
+    die "$REMOTE_ENDPOINT_ERROR"
+  fi
   # A remote steer is delivered by durable record, never by typing its payload
   # into the pane: write it into this secondmate's host-local steering inbox,
   # then ring the constant self-describing doorbell into the recorded pane,
@@ -199,8 +206,11 @@ cmd_send() {
   # the parent may safely repeat this leg. Exit 0 once the record durably
   # exists; no ring outcome changes it, because the parent's pending-reply
   # reconciliation owns loss detection for a remote request from here.
-  rec=$(fm_task_inbox_write_idempotent "$CONTROL_STATE" "$id" "$message") \
-    || die "steering-inbox record could not be written under $CONTROL_STATE/$id.inbox"
+  if ! rec=$(fm_task_inbox_write_idempotent "$CONTROL_STATE" "$id" "$message"); then
+    fm_lock_release "$meta_lock"
+    die "steering-inbox record could not be written under $CONTROL_STATE/$id.inbox"
+  fi
+  fm_lock_release "$meta_lock"
   case "$rec" in
     */handled/*)
       # The dedup landed on a record the worker already acknowledged: the
