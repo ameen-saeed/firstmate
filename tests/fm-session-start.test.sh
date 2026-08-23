@@ -1395,17 +1395,13 @@ EOF
   [ ! -e "$home/state/.lease-task-dead" ] || fail "locked start left a provably dead lease in place"
   [ -e "$home/state/.lease-task-live" ] || fail "locked start swept a live lease"
 
-  # Capturing the digest is not delivery: replay remains unread until the Pi
-  # adapter confirms that its append into main succeeded.
-  out=$(run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-  assert_contains "$out" "BRANCH OUTCOMES" "captured-but-undelivered replay was marked read"
-  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" startup-replay-ack --through 1 \
-    || fail "could not acknowledge the delivered startup replay"
+  # Replay is one-shot: presenting the digest is the delivery, so the next
+  # locked start stays silent about the same outcome.
   out=$(run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH")
   case "$out" in
-    *"BRANCH OUTCOMES"*) fail "acknowledged replay was presented again" ;;
+    *"BRANCH OUTCOMES"*) fail "second start re-presented already-replayed branch outcomes" ;;
   esac
-  pass "locked Pi session start retains replay until delivery and sweeps only dead leases"
+  pass "locked Pi session start replays unread branch outcomes once and sweeps only dead leases"
 }
 
 test_non_pi_session_start_leaves_branch_state_untouched() {
@@ -1420,7 +1416,7 @@ EOF
   FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
     --task task-b --verdict captain --summary 'unread Pi branch outcome' >/dev/null \
     || fail "could not seed the non-Pi unread branch outcome"
-  rm -f "$home/state/.branch-outcomes-cursor" "$home/state/.fm-lease-command.lock"
+  rm -f "$home/state/.branch-outcomes-cursor"
   printf 'branch\t999999\t123\n' > "$home/state/.lease-task-dead"
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
@@ -1429,7 +1425,6 @@ EOF
   esac
   [ -e "$home/state/.lease-task-dead" ] || fail "non-Pi session swept a Pi branch lease"
   [ ! -e "$home/state/.branch-outcomes-cursor" ] || fail "non-Pi session marked a Pi branch outcome read"
-  [ ! -e "$home/state/.fm-lease-command.lock" ] || fail "non-Pi session invoked the Pi lease sweep"
   pass "non-Pi session start neither sweeps nor replays Pi branch state"
 }
 

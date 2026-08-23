@@ -4,21 +4,17 @@
 #
 # CONTRACT (this header is the one owner of the store's format).
 #   - Store: $STATE/branch-outcomes.jsonl, strictly APPEND-ONLY. One JSON
-#     object per line: {"seq":N,"wake_seq":N,"epoch":N,"task":"...",
-#     "wake":"...","verdict":"routine"|"captain","summary":"..."}. Existing lines are never
+#     object per line: {"seq":N,"epoch":N,"task":"...","wake":"...",
+#     "verdict":"routine"|"captain","summary":"..."}. Existing lines are never
 #     rewritten, reordered, or deleted by any subcommand; the read state lives
 #     entirely in the cursor sidecar so marking outcomes read cannot disturb
 #     the log. Retention: the log is small (one line per handled fleet event)
 #     and truncation, if ever needed, is a captain-approved manual act.
-#   - Cursor: $STATE/.branch-outcomes-cursor holds the highest contiguous seq
+#   - Cursor: $STATE/.branch-outcomes-cursor holds the highest seq already
 #     delivered into main's context (via the branch's append-only merge note,
-#     or via the session-start replay). An unreceipted record above the cursor
-#     is unread because no durable proof says main saw it; replay is preferred
-#     to loss across the crash window between store append and merge receipt.
-#   - Delivery receipts live under $STATE/branch-outcomes-delivered/ for rows
-#     delivered out of order. Replay excludes those rows, and the cursor
-#     advances only over the contiguous combination of acknowledged replay
-#     rows and delivery receipts.
+#     or via the session-start replay). Records above the cursor are "unread":
+#     the branch wrote them durably but main never saw them - the crash window
+#     between the store write and the merge append.
 #   - Every mutation runs under $STATE/.branch-outcomes.lock so the branch
 #     extension and a concurrent session-start replay cannot interleave.
 #   - The store is written BEFORE the merge note is appended to main
@@ -27,10 +23,8 @@
 #
 # Usage:
 #   fm-branch-outcome.sh append --task <id> --verdict routine|captain \
-#       --summary <text> [--wake <text>] [--wake-seq <n>] [--result-record]
-#     Append one outcome record; prints the assigned seq. A positive wake-seq
-#     is idempotent and returns the existing record instead of appending again.
-#     --result-record prints status<TAB>record for the branch adapter.
+#       --summary <text> [--wake <text>]
+#     Append one outcome record; prints the assigned seq.
 #   fm-branch-outcome.sh unread
 #     Print every unread record (raw JSONL). Exit 0 with no output when none.
 #   fm-branch-outcome.sh mark-read --through <seq>
@@ -39,10 +33,10 @@
 #   fm-branch-outcome.sh list [--recent <n>]
 #     Print the last n records (default 20), read or not.
 #   fm-branch-outcome.sh startup-replay
-#     Session-start recovery: print unread records under a labeled header
-#     without advancing the cursor.
-#   fm-branch-outcome.sh startup-replay-ack --through <seq>
-#     Advance the replay cursor only after the caller delivered replay output.
+#     Session-start recovery: print unread records under a labeled header and
+#     mark them read. Prints nothing when nothing is unread, so a home that
+#     never ran the branch stays silent. Run it only when the session holds
+#     the lock (fm-session-start.sh owns the call site).
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -51,11 +45,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 STORE="$STATE/branch-outcomes.jsonl"
 CURSOR="$STATE/.branch-outcomes-cursor"
-DELIVERED_DIR="$STATE/branch-outcomes-delivered"
 LOCK="$STATE/.branch-outcomes.lock"
 
 usage() {
-  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--wake-seq <n>] [--result-record] | unread | mark-read --through <seq> | mark-delivered --seq <seq> | list [--recent <n>] | startup-replay | startup-replay-ack --through <seq>" >&2
+  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] | unread | mark-read --through <seq> | list [--recent <n>] | startup-replay" >&2
   exit 2
 }
 
@@ -99,7 +92,6 @@ print_unread() {
     seq=$(record_seq "$line")
     [ -n "$seq" ] || continue
     [ "$seq" -gt "$cursor" ] || continue
-    [ ! -f "$DELIVERED_DIR/$seq" ] || continue
     printf '%s\n' "$line"
   done < "$STORE"
 }
@@ -111,26 +103,6 @@ advance_cursor() { # <seq>
   tmp=$(mktemp "$STATE/.branch-outcomes-cursor.XXXXXX")
   printf '%s\n' "$through" > "$tmp"
   mv -f -- "$tmp" "$CURSOR"
-  for tmp in "$DELIVERED_DIR"/*; do
-    [ -f "$tmp" ] || continue
-    case "${tmp##*/}" in ''|*[!0-9]*) continue ;; esac
-    [ "${tmp##*/}" -gt "$through" ] || rm -f -- "$tmp"
-  done
-}
-
-advance_delivered_cursor() {
-  local next last
-  next=$(( $(read_cursor) + 1 ))
-  last=$(last_seq)
-  while [ "$next" -le "$last" ] && [ -f "$DELIVERED_DIR/$next" ]; do
-    advance_cursor "$next"
-    next=$((next + 1))
-  done
-}
-
-acknowledge_through() { # <seq>
-  advance_cursor "$1"
-  advance_delivered_cursor
 }
 
 CMD=${1:-}
@@ -142,54 +114,25 @@ case "$CMD" in
     VERDICT=''
     SUMMARY=''
     WAKE=''
-    WAKE_SEQ=0
-    RESULT_RECORD=0
     while [ "$#" -gt 0 ]; do
       case "$1" in
         --task) TASK=${2:-}; shift 2 || usage ;;
         --verdict) VERDICT=${2:-}; shift 2 || usage ;;
         --summary) SUMMARY=${2:-}; shift 2 || usage ;;
         --wake) WAKE=${2:-}; shift 2 || usage ;;
-        --wake-seq) WAKE_SEQ=${2:-}; shift 2 || usage ;;
-        --result-record) RESULT_RECORD=1; shift ;;
         *) usage ;;
       esac
     done
     [ -n "$TASK" ] || usage
     [ -n "$SUMMARY" ] || usage
-    case "$WAKE_SEQ" in ''|*[!0-9]*) usage ;; esac
     case "$VERDICT" in routine|captain) ;; *) usage ;; esac
     fm_lock_acquire_wait "$LOCK"
-    EXISTING_LINE=
-    if [ "$WAKE_SEQ" -gt 0 ] && [ -s "$STORE" ]; then
-      EXISTING_LINE=$(grep -E -m 1 '^\{"seq":[0-9]+,"wake_seq":'"$WAKE_SEQ"',' "$STORE" 2>/dev/null || true)
-    fi
-    if [ -n "$EXISTING_LINE" ]; then
-      SEQ=$(record_seq "$EXISTING_LINE")
-      CURSOR_VALUE=$(read_cursor)
-      STATUS=existing-unread
-      if [ "$SEQ" -le "$CURSOR_VALUE" ] || [ -f "$DELIVERED_DIR/$SEQ" ]; then
-        STATUS=existing-delivered
-      fi
-      fm_lock_release "$LOCK"
-      if [ "$RESULT_RECORD" -eq 1 ]; then
-        printf '%s\t%s\n' "$STATUS" "$EXISTING_LINE"
-      else
-        printf '%s\n' "$SEQ"
-      fi
-      exit 0
-    fi
     SEQ=$(( $(last_seq) + 1 ))
-    LINE=$(printf '{"seq":%s,"wake_seq":%s,"epoch":%s,"task":"%s","wake":"%s","verdict":"%s","summary":"%s"}' \
-      "$SEQ" "$WAKE_SEQ" "$(date +%s)" "$(json_escape "$TASK")" "$(json_escape "$WAKE")" \
-      "$VERDICT" "$(json_escape "$SUMMARY")")
-    printf '%s\n' "$LINE" >> "$STORE"
+    printf '{"seq":%s,"epoch":%s,"task":"%s","wake":"%s","verdict":"%s","summary":"%s"}\n' \
+      "$SEQ" "$(date +%s)" "$(json_escape "$TASK")" "$(json_escape "$WAKE")" \
+      "$VERDICT" "$(json_escape "$SUMMARY")" >> "$STORE"
     fm_lock_release "$LOCK"
-    if [ "$RESULT_RECORD" -eq 1 ]; then
-      printf 'new\t%s\n' "$LINE"
-    else
-      printf '%s\n' "$SEQ"
-    fi
+    printf '%s\n' "$SEQ"
     ;;
   unread)
     [ "$#" -eq 0 ] || usage
@@ -203,21 +146,7 @@ case "$CMD" in
     case "$THROUGH" in ''|*[!0-9]*) usage ;; esac
     [ "$#" -eq 2 ] || usage
     fm_lock_acquire_wait "$LOCK"
-    acknowledge_through "$THROUGH"
-    fm_lock_release "$LOCK"
-    ;;
-  mark-delivered)
-    [ "${1:-}" = --seq ] || usage
-    DELIVERED=${2:-}
-    case "$DELIVERED" in ''|*[!0-9]*|0) usage ;; esac
-    [ "$#" -eq 2 ] || usage
-    fm_lock_acquire_wait "$LOCK"
-    CURSOR_VALUE=$(read_cursor)
-    if [ "$DELIVERED" -gt "$CURSOR_VALUE" ]; then
-      mkdir -p "$DELIVERED_DIR"
-      : > "$DELIVERED_DIR/$DELIVERED"
-      advance_delivered_cursor
-    fi
+    advance_cursor "$THROUGH"
     fm_lock_release "$LOCK"
     ;;
   list)
@@ -238,16 +167,9 @@ case "$CMD" in
     if [ -n "$UNREAD" ]; then
       printf 'BRANCH OUTCOMES (handled by the supervision branch, not yet seen by this session):\n'
       printf '%s\n' "$UNREAD"
+      LAST=$(record_seq "$(printf '%s\n' "$UNREAD" | tail -n 1)")
+      [ -z "$LAST" ] || advance_cursor "$LAST"
     fi
-    fm_lock_release "$LOCK"
-    ;;
-  startup-replay-ack)
-    [ "${1:-}" = --through ] || usage
-    THROUGH=${2:-}
-    case "$THROUGH" in ''|*[!0-9]*) usage ;; esac
-    [ "$#" -eq 2 ] || usage
-    fm_lock_acquire_wait "$LOCK"
-    acknowledge_through "$THROUGH"
     fm_lock_release "$LOCK"
     ;;
   *) usage ;;

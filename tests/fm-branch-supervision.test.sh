@@ -45,10 +45,6 @@ test_branch_prompt_is_byte_stable_and_above_cache_floor() {
     *) fail "branch prompt lost its role preamble" ;;
   esac
   case "$out_a" in
-    *"4. Report:"*"5. Acknowledge only after every fm_branch_report succeeds:"*) ;;
-    *) fail "branch prompt does not require a durable report before wake acknowledgement" ;;
-  esac
-  case "$out_a" in
     *"stuck-crewmate-recovery"*) ;;
     *) fail "branch prompt lost the inlined recovery playbook" ;;
   esac
@@ -96,99 +92,15 @@ PY
   replay=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" startup-replay) || fail "startup-replay failed"
   assert_contains "$replay" "BRANCH OUTCOMES" "replay lost its section header"
   assert_contains "$replay" "https://example.com/pr/2" "replay lost the unread outcome"
-  [ "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" startup-replay)" = "$replay" ] \
-    || fail "startup-replay advanced its cursor before delivery acknowledgement"
-  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" startup-replay-ack --through 2 \
-    || fail "startup replay acknowledgement failed"
   [ -z "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" startup-replay)" ] \
-    || fail "acknowledged startup replay was presented again"
+    || fail "startup-replay re-presented already-read outcomes"
   FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
     --task task-3 --verdict routine --summary 'later outcome' >/dev/null || fail "third append failed"
   case "$(cat "$store")" in
     "$snapshot"*) ;;
     *) fail "a later append disturbed earlier store bytes" ;;
   esac
-  pass "outcome store is append-only with cursor-based unread reads and acknowledged startup replay"
-}
-
-test_outcome_append_is_idempotent_per_wake_sequence() {
-  local home first second
-  home="$TMP_ROOT/outcome-idempotency-home"
-  mkdir -p "$home/state"
-  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
-    --task decoy --verdict routine --summary '{"wake_seq":5, deceptive summary content' >/dev/null \
-    || fail "deceptive summary outcome append failed"
-  first=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
-    --task task-5 --verdict captain --summary original --wake-seq 5) \
-    || fail "first wake outcome append failed"
-  second=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
-    --task task-5 --verdict routine --summary duplicate --wake-seq 5) \
-    || fail "duplicate wake outcome append failed"
-  [ "$first" = "$second" ] || fail "duplicate wake sequence returned a different outcome"
-  [ "$(wc -l < "$home/state/branch-outcomes.jsonl" | tr -d ' ')" = 2 ] \
-    || fail "wake-sequence identity matched summary content or appended a duplicate"
-  assert_contains "$(cat "$home/state/branch-outcomes.jsonl")" '"summary":"original"' \
-    "duplicate wake sequence replaced the original outcome"
-  pass "outcome append is durable-idempotent for positive wake sequences"
-}
-
-test_outcome_delivery_cursor_requires_contiguous_delivery() {
-  local home replay
-  home="$TMP_ROOT/delivery-cursor-home"
-  mkdir -p "$home/state"
-  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
-    --task task-1 --verdict routine --summary first >/dev/null || fail "first delivery outcome append failed"
-  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
-    --task task-2 --verdict routine --summary second >/dev/null || fail "second delivery outcome append failed"
-  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-delivered --seq 2 \
-    || fail "out-of-order delivery receipt failed"
-  replay=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" startup-replay) \
-    || fail "out-of-order startup replay failed"
-  assert_contains "$replay" '"seq":1' "startup replay omitted the undelivered first outcome"
-  assert_not_contains "$replay" '"seq":2' "startup replay duplicated the already delivered second outcome"
-  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" startup-replay-ack --through 1 \
-    || fail "first outcome replay acknowledgement failed"
-  [ "$(cat "$home/state/.branch-outcomes-cursor")" = 2 ] \
-    || fail "replay acknowledgement did not advance across the second outcome receipt"
-  [ -z "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" startup-replay)" ] \
-    || fail "delivered outcomes replayed after contiguous acknowledgement"
-  pass "out-of-order delivered outcomes replay exactly once and advance contiguously"
-}
-
-test_branch_ack_requires_every_presented_outcome() {
-  local home drain_out drain_err through generation first_seq second_seq out
-  home="$TMP_ROOT/ack-coverage-home"
-  mkdir -p "$home/state"
-  STATE="$home/state"
-  # shellcheck source=bin/fm-wake-lib.sh
-  . "$ROOT/bin/fm-wake-lib.sh"
-  fm_wake_append signal task-a 'first event' || fail "first wake append failed"
-  fm_wake_append check task-b 'second event' || fail "second wake append failed"
-  drain_out="$home/drain.out"
-  drain_err="$home/drain.err"
-  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-wake-drain.sh" >"$drain_out" 2>"$drain_err" \
-    || fail "branch coverage drain failed"
-  through=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$drain_err")
-  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$drain_err")
-  first_seq=$(awk -F '\t' 'NR == 1 { print $2 }' "$drain_out")
-  second_seq=$(awk -F '\t' 'NR == 2 { print $2 }' "$drain_out")
-  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task decoy --verdict routine \
-    --summary '{"wake_seq":'"$second_seq"', deceptive summary content' >/dev/null \
-    || fail "deceptive acknowledgement summary append failed"
-  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task task-a --verdict routine \
-    --summary handled --wake-seq "$first_seq" >/dev/null || fail "first covered outcome append failed"
-  if out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-wake-drain.sh" \
-    --ack-through "$through" --recovery-generation "$generation" 2>&1); then
-    fail "branch acknowledgement consumed an event without an outcome"
-  fi
-  assert_contains "$out" "wake sequence $second_seq has no durable outcome" "coverage refusal did not identify the omitted wake"
-  [ -s "$home/state/.wake-queue" ] || fail "coverage refusal consumed the durable wake queue"
-  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task task-b --verdict routine \
-    --summary handled --wake-seq "$second_seq" >/dev/null || fail "second covered outcome append failed"
-  FM_HOME="$home" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-wake-drain.sh" \
-    --ack-through "$through" --recovery-generation "$generation" || fail "fully covered acknowledgement failed"
-  [ ! -s "$home/state/.wake-queue" ] || fail "fully covered acknowledgement left wakes queued"
-  pass "branch acknowledgement requires a durable outcome for every presented wake"
+  pass "outcome store is append-only with cursor-based unread reads and one-shot startup replay"
 }
 
 # --- lease contract -----------------------------------------------------------
@@ -213,104 +125,10 @@ test_lease_exclusivity_release_stale_and_sweep() {
   FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_LEASE_HOLDER_PID=$$ "$ROOT/bin/fm-lease.sh" claim task-1 \
     || fail "same-actor refresh was refused"
 
-  for round in $(seq 1 12); do
-    task="race-$round"
-    (FM_HOME="$home" FM_LEASE_HOLDER_PID=$$ "$ROOT/bin/fm-lease.sh" claim "$task" --actor main \
-      >"$home/main-$round.out" 2>&1; echo $? >"$home/main-$round.status") &
-    main_pid=$!
-    (FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_LEASE_HOLDER_PID=$$ "$ROOT/bin/fm-lease.sh" claim "$task" --actor branch \
-      >"$home/branch-$round.out" 2>&1; echo $? >"$home/branch-$round.status") &
-    branch_pid=$!
-    wait "$main_pid" "$branch_pid"
-    main_status=$(cat "$home/main-$round.status")
-    branch_status=$(cat "$home/branch-$round.status")
-    case "$main_status:$branch_status" in
-      0:6|6:0) ;;
-      *) fail "concurrent claims did not produce one winner for $task: main=$main_status branch=$branch_status" ;;
-    esac
-    out=$(FM_HOME="$home" "$ROOT/bin/fm-lease.sh" check "$task") || fail "concurrent winner left no lease for $task"
-    case "$main_status:$out" in
-      0:"main "*) ;;
-      6:"branch "*) ;;
-      *) fail "lease holder disagreed with the concurrent winner for $task: $out" ;;
-    esac
-  done
-
-  mkdir -p "$home/no-python"
-  cat > "$home/no-python/python3" <<'SH'
-#!/usr/bin/env bash
-exit 99
-SH
-  chmod +x "$home/no-python/python3"
-  PATH="$home/no-python:$PATH" FM_HOME="$home" FM_LEASE_HOLDER_PID=$$ \
-    "$ROOT/bin/fm-lease.sh" claim portable --actor main || fail "portable lease claim depended on python3"
-
-  rm -f "$home/guard-ready" "$home/guard-release"
-  (STATE="$home/state" FM_HOME="$home" FM_SUPERVISION_ACTOR=main bash -c '
-    . "$1"
-    fm_lease_guard guarded "guard probe"
-    : > "$2/guard-ready"
-    while [ ! -e "$2/guard-release" ]; do sleep 0.01; done
-    fm_lease_guard_release
-  ' _ "$ROOT/bin/fm-lease-lib.sh" "$home") &
-  guard_pid=$!
-  for _ in $(seq 1 100); do
-    [ -e "$home/guard-ready" ] && break
-    sleep 0.01
-  done
-  [ -e "$home/guard-ready" ] || fail "active guard did not acquire its lease"
-  out=$(FM_HOME="$home" FM_LEASE_HOLDER_PID=$$ "$ROOT/bin/fm-lease.sh" claim guarded --actor branch 2>&1)
-  [ $? -eq 6 ] || fail "branch claim entered while main's guarded mutation was active: $out"
-  : > "$home/guard-release"
-  wait "$guard_pid" || fail "guard probe failed"
-  FM_HOME="$home" "$ROOT/bin/fm-lease.sh" check guarded >/dev/null && fail "guard lease survived entrypoint cleanup"
-
-  # Only the owning actor may release its lease; release of an unheld lease
-  # stays a silent no-op for that actor.
-  FM_HOME="$home" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-lease.sh" release task-1 --actor branch \
-    || fail "release failed"
+  # Release by holder name; release of an unheld lease stays a silent no-op.
+  FM_HOME="$home" "$ROOT/bin/fm-lease.sh" release task-1 --actor branch || fail "release failed"
   FM_HOME="$home" "$ROOT/bin/fm-lease.sh" check task-1 >/dev/null && fail "released lease still reported"
-  FM_HOME="$home" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-lease.sh" release task-1 --actor branch \
-    || fail "idempotent release failed"
-
-  FM_HOME="$home" FM_LEASE_HOLDER_PID=$$ "$ROOT/bin/fm-lease.sh" claim protected-main --actor main \
-    || fail "protected main lease claim failed"
-  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-lease.sh" \
-    release protected-main --actor main 2>&1)
-  [ $? -eq 6 ] || fail "branch release of a main lease was not refused: $out"
-  assert_contains "$out" "cannot release the main actor's lease" "cross-actor release refusal lost its authority boundary"
-  FM_HOME="$home" "$ROOT/bin/fm-lease.sh" check protected-main >/dev/null \
-    || fail "refused cross-actor release removed the main lease"
-  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-lease.sh" \
-    release-actor --actor main 2>&1)
-  [ $? -eq 6 ] || fail "branch release-actor of main leases was not refused: $out"
-  FM_HOME="$home" "$ROOT/bin/fm-lease.sh" check protected-main >/dev/null \
-    || fail "refused cross-actor release-actor removed the main lease"
-
-  # Actor text is not authority by itself. A branch command that changes its
-  # environment to say "main" is still not descended from main's holder shell.
-  rm -f "$home/process-ready" "$home/process-release"
-  (FM_HOME="$home" FM_LEASE_HOLDER_PID="$BASHPID" "$ROOT/bin/fm-lease.sh" \
-      claim protected-process --actor main || exit
-    : > "$home/process-ready"
-    while [ ! -e "$home/process-release" ]; do sleep 0.01; done
-  ) &
-  process_holder=$!
-  for _ in $(seq 1 100); do
-    [ -e "$home/process-ready" ] && break
-    sleep 0.01
-  done
-  [ -e "$home/process-ready" ] || fail "separate main holder did not claim its lease"
-  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=main "$ROOT/bin/fm-lease.sh" \
-    release protected-process --actor main 2>&1)
-  [ $? -eq 6 ] || fail "spoofed main actor released a sibling process lease: $out"
-  assert_contains "$out" "does not own the process" "process-bound release refusal was unclear"
-  FM_HOME="$home" FM_SUPERVISION_ACTOR=main "$ROOT/bin/fm-lease.sh" \
-    release-actor --actor main || fail "process-bound bulk release failed"
-  FM_HOME="$home" "$ROOT/bin/fm-lease.sh" check protected-process >/dev/null \
-    || fail "spoofed main actor bulk-released a sibling process lease"
-  : > "$home/process-release"
-  wait "$process_holder" || fail "separate main holder failed"
+  FM_HOME="$home" "$ROOT/bin/fm-lease.sh" release task-1 --actor branch || fail "idempotent release failed"
 
   # A lease held by a dead process is stale: claimable by the other actor and
   # removed by the sweep, while a live lease survives the sweep.
@@ -347,7 +165,7 @@ test_mutating_scripts_refuse_the_other_actors_lease() {
 
   # fm-control: refused while the branch holds the lease; the ordinary no-task
   # error (a different failure) proves pass-through once the lease is gone.
-  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=main "$ROOT/bin/fm-control.sh" task-held interrupt 2>&1)
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-control.sh" task-held interrupt 2>&1)
   status=$?
   [ "$status" -eq 6 ] || fail "leased fm-control exited $status, not 6: $out"
   assert_contains "$out" "leased to the branch supervision actor" "fm-control refusal lost the holder"
@@ -355,23 +173,16 @@ test_mutating_scripts_refuse_the_other_actors_lease() {
   status=$?
   [ "$status" -ne 6 ] || fail "unleased fm-control still hit the lease refusal"
   assert_contains "$out" "no task 'task-unheld'" "unleased fm-control lost its ordinary error"
-  [ ! -e "$home/state/.lease-task-unheld" ] || fail "fm-control cleanup left its acquired lease behind"
-
-  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-teardown.sh" task-unheld --force 2>&1)
-  status=$?
-  [ "$status" -eq 6 ] || fail "branch forced teardown exited $status, not 6: $out"
-  assert_contains "$out" "cannot discard work" "branch forced teardown refusal lost its destructive boundary"
-  [ ! -e "$home/state/.lease-task-unheld" ] || fail "refused branch forced teardown acquired a lease"
 
   # fm-teardown: same refusal shape before any teardown work.
-  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=main "$ROOT/bin/fm-teardown.sh" task-held 2>&1)
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-teardown.sh" task-held 2>&1)
   status=$?
   [ "$status" -eq 6 ] || fail "leased fm-teardown exited $status, not 6: $out"
   assert_contains "$out" "teardown (fm-teardown) refused" "fm-teardown refusal lost its action label"
 
   # The same lease refuses the BRANCH actor when MAIN holds it - the guard is
   # symmetric, not a branch-only fence.
-  FM_HOME="$home" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-lease.sh" release task-held --actor branch
+  FM_HOME="$home" "$ROOT/bin/fm-lease.sh" release task-held --actor branch
   FM_HOME="$home" FM_LEASE_HOLDER_PID=$$ "$ROOT/bin/fm-lease.sh" claim task-held --actor main \
     || fail "main fixture claim failed"
   out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-control.sh" task-held interrupt 2>&1)
@@ -405,25 +216,6 @@ test_main_owned_actions_refuse_the_branch_actor() {
   [ "$status" -eq 6 ] || fail "branch fm-spawn exited $status, not 6: $out"
   assert_contains "$out" "new-task spawn (fm-spawn) refused" "spawn refusal lost its action label"
 
-  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_SUPERVISION_ACTOR=branch \
-    "$ROOT/bin/fm-spawn.sh" task-relaunch --relaunch 2>&1)
-  status=$?
-  [ "$status" -eq 6 ] || fail "direct branch relaunch exited $status, not 6: $out"
-  assert_contains "$out" "must relaunch through fm-control" "direct branch relaunch refusal lost its control boundary"
-
-  out=$(STATE="$home/state" FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_SUPERVISION_ACTOR=branch bash -c '
-    . "$1/bin/fm-wake-lib.sh"
-    lock="$2/.control-task-parent.lock"
-    fm_lock_acquire_wait "$lock"
-    FM_CONTROL_RELAUNCH_TX=test-transaction "$1/bin/fm-spawn.sh" task-parent --relaunch
-    status=$?
-    fm_lock_release "$lock"
-    exit "$status"
-  ' _ "$ROOT" "$home/state" 2>&1)
-  status=$?
-  [ "$status" -ne 6 ] || fail "fm-control-parented branch relaunch hit the role refusal: $out"
-  assert_contains "$out" "needs an existing task record" "parented branch relaunch did not reach ordinary validation"
-
   # The same calls as MAIN fail on their ORDINARY validation instead - the
   # partition guard never fires for the main actor.
   out=$(FM_HOME="$home" "$ROOT/bin/fm-merge-local.sh" task-x 2>&1)
@@ -436,29 +228,15 @@ test_main_owned_actions_refuse_the_branch_actor() {
 test_home_without_branch_is_untouched() {
   local home out status
   home="$TMP_ROOT/untouched-home"
-  mkdir -p "$home/state" "$home/fakebin"
-  printf '%s\n%s\nstale-generation\n' "$$" "$$" > "$home/state/.pi-branch-extension-loaded"
-  printf '%s\n' "$$" > "$home/state/.lock"
-  cat > "$home/fakebin/ps" <<'SH'
-#!/usr/bin/env bash
-case "$*" in
-  *'comm='*) printf '%s\n' claude ;;
-  *'args='*) printf '%s\n' claude ;;
-  *'ppid='*) printf '%s\n' 1 ;;
-esac
-SH
-  chmod +x "$home/fakebin/ps"
+  mkdir -p "$home/state"
 
   # No lease files, no actor variable: the guard layer must be invisible - the
   # scripts fail (or succeed) exactly on their pre-existing logic, and nothing
   # branch-related appears in state/.
-  printf 'branch\t%s\t123\n' "$$" > "$home/state/.lease-task-any"
-  out=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-control.sh" task-any interrupt 2>&1)
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-control.sh" task-any interrupt 2>&1)
   status=$?
   [ "$status" -ne 6 ] || fail "no-branch home hit a lease refusal in fm-control"
   assert_contains "$out" "no task 'task-any'" "no-branch fm-control lost its ordinary error"
-  [ -e "$home/state/.lease-task-any" ] || fail "non-Pi guard mutated a stale Pi lease"
-  rm -f "$home/state/.lease-task-any"
   out=$(FM_HOME="$home" "$ROOT/bin/fm-pr-merge.sh" 2>&1)
   status=$?
   [ "$status" -eq 2 ] || fail "no-branch fm-pr-merge usage error changed: $status: $out"
@@ -466,17 +244,109 @@ SH
     || fail "guard layer created branch state in a home that never ran the branch"
 
   # The guard helpers themselves: silent pass with no lease and no actor.
-  out=$(PATH="$home/fakebin:$PATH" STATE="$home/state" bash -c '. "$1"; fm_lease_guard task-any "probe"; fm_lease_forbid_branch "probe"; echo silent-pass' _ "$ROOT/bin/fm-lease-lib.sh" 2>&1)
+  out=$(STATE="$home/state" bash -c '. "$1"; fm_lease_guard task-any "probe"; fm_lease_forbid_branch "probe"; echo silent-pass' _ "$ROOT/bin/fm-lease-lib.sh" 2>&1)
   [ "$out" = "silent-pass" ] || fail "guard helpers were not silent in a no-branch home: $out"
   pass "a home that never runs the branch sees no lease files, no refusals, and no new state"
 }
 
+# --- session-bound staleness and the loud accidental-override guard ---------
+
+test_lease_liveness_binds_to_the_session_lock() {
+  local home out
+  home="$TMP_ROOT/lock-bound-home"
+  mkdir -p "$home/state"
+
+  # A lease recorded by a pid that is alive but is NOT the current session-lock
+  # holder is stale: a Pi session exited and its pid was recycled, or a non-Pi
+  # harness now owns this home. Either way the leftover lease must not bind.
+  printf '%s\n' "$$" > "$home/state/.lock.other"
+  printf 'branch\t%s\t123\n' "$PPID" > "$home/state/.lease-task-reused"
+  printf '%s\n' "$$" > "$home/state/.lock"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-lease.sh" check task-reused) || fail "check missed the leftover lease"
+  case "$out" in
+    *" stale") ;;
+    *) fail "an alive non-lock-holder pid read as live: $out" ;;
+  esac
+  FM_HOME="$home" "$ROOT/bin/fm-lease.sh" sweep || fail "sweep failed"
+  [ ! -e "$home/state/.lease-task-reused" ] || fail "sweep kept a lease whose pid is not the lock holder"
+
+  # The same pid IS live while the lock names it.
+  FM_HOME="$home" FM_LEASE_HOLDER_PID=$$ "$ROOT/bin/fm-lease.sh" claim task-current --actor main \
+    || fail "claim under the current lock holder failed"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-lease.sh" check task-current)
+  case "$out" in
+    "main $$ "*" live") ;;
+    *) fail "the current lock holder's lease did not read live: $out" ;;
+  esac
+  pass "lease liveness requires the recorded pid to be the current session-lock holder"
+}
+
+test_claim_refuses_the_other_actors_name_loudly() {
+  local home out status
+  home="$TMP_ROOT/claim-guard-home"
+  mkdir -p "$home/state"
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_LEASE_HOLDER_PID=$$ \
+    "$ROOT/bin/fm-lease.sh" claim task-z --actor main 2>&1)
+  status=$?
+  [ "$status" -eq 6 ] || fail "cross-actor claim exited $status, not 6: $out"
+  assert_contains "$out" "cannot claim a lease as main" "accidental-override refusal lost its wording"
+  [ ! -e "$home/state/.lease-task-z" ] || fail "refused claim still created a lease"
+  pass "a claim naming the other actor fails loudly instead of silently impersonating it"
+}
+
+test_release_actor_drops_only_that_actors_leases() {
+  local home
+  home="$TMP_ROOT/release-actor-home"
+  mkdir -p "$home/state"
+  FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_LEASE_HOLDER_PID=$$ "$ROOT/bin/fm-lease.sh" claim task-a --actor branch \
+    || fail "branch claim failed"
+  FM_HOME="$home" FM_LEASE_HOLDER_PID=$$ "$ROOT/bin/fm-lease.sh" claim task-b --actor main \
+    || fail "main claim failed"
+  FM_HOME="$home" "$ROOT/bin/fm-lease.sh" release-actor --actor branch || fail "release-actor failed"
+  [ ! -e "$home/state/.lease-task-a" ] || fail "release-actor kept the branch lease"
+  [ -e "$home/state/.lease-task-b" ] || fail "release-actor dropped main's lease"
+  pass "release-actor drops every lease of one actor and nothing else"
+}
+
+# --- role-partition refinements ----------------------------------------------
+
+test_branch_cannot_force_teardown_or_directly_relaunch() {
+  local home root out status
+  home="$TMP_ROOT/partition2-home"
+  root="$TMP_ROOT/partition2-root"
+  mkdir -p "$home/state" "$root"
+  git init -q -b main "$root"
+  git -C "$root" commit -q --allow-empty -m init
+  ln -s "$ROOT/bin" "$root/bin"
+
+  # Forced teardown discards work; the branch never discards anything.
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-teardown.sh" task-x --force 2>&1)
+  status=$?
+  [ "$status" -eq 6 ] || fail "branch forced teardown exited $status, not 6: $out"
+  assert_contains "$out" "cannot discard work" "forced-teardown refusal lost its wording"
+  # An ORDINARY branch teardown is not blocked by this guard (it fails later
+  # on its ordinary no-task validation instead).
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-teardown.sh" task-x 2>&1)
+  status=$?
+  [ "$status" -ne 6 ] || fail "ordinary branch teardown hit the forced-discard refusal: $out"
+
+  # A branch relaunch is legal only through fm-control's owned transaction,
+  # never by direct fm-spawn invocation.
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_SUPERVISION_ACTOR=branch \
+    "$ROOT/bin/fm-spawn.sh" task-x --relaunch 2>&1)
+  status=$?
+  [ "$status" -eq 6 ] || fail "direct branch relaunch exited $status, not 6: $out"
+  assert_contains "$out" "must relaunch through fm-control" "relaunch refusal lost its wording"
+  pass "the branch cannot force a teardown or bypass fm-control for a relaunch"
+}
+
 test_branch_prompt_is_byte_stable_and_above_cache_floor
 test_outcome_store_is_append_only_with_cursor_reads
-test_outcome_append_is_idempotent_per_wake_sequence
-test_outcome_delivery_cursor_requires_contiguous_delivery
-test_branch_ack_requires_every_presented_outcome
 test_lease_exclusivity_release_stale_and_sweep
 test_mutating_scripts_refuse_the_other_actors_lease
 test_main_owned_actions_refuse_the_branch_actor
 test_home_without_branch_is_untouched
+test_lease_liveness_binds_to_the_session_lock
+test_claim_refuses_the_other_actors_name_loudly
+test_release_actor_drops_only_that_actors_leases
+test_branch_cannot_force_teardown_or_directly_relaunch

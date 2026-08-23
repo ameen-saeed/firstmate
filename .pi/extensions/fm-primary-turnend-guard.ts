@@ -98,25 +98,16 @@ function startupRebuildSource(ctx: SessionStartContext): "resume" | "fork" | und
 const sessionstartTruncatedMarker =
   "\n\nPI SESSION-START DELIVERY TRUNCATED - the digest exceeded 512 KiB. " +
   "Treat omitted context as unread and inspect the named files directly before acting on it.";
-type SessionstartOutput = { content: string; branchReplayThrough?: string };
 
-function acknowledgeBranchReplay(through: string): void {
-  spawnSync(`${root}/bin/fm-branch-outcome.sh`, ["startup-replay-ack", "--through", through], {
-    stdio: "ignore",
-  });
-}
-
-function runSessionstartHook(source: string): Promise<SessionstartOutput> {
+function runSessionstartHook(source: string): Promise<string> {
   return new Promise((resolveResult) => {
     const child = spawn(`${root}/bin/fm-sessionstart-run.sh`, ["--source", source], {
-      stdio: ["ignore", "pipe", "ignore", "pipe"],
-      env: { ...process.env, FM_SESSIONSTART_REPLAY_METADATA_FD: "3" },
+      stdio: ["ignore", "pipe", "ignore"],
     });
     const chunks: Buffer[] = [];
-    let replayMetadata = "";
     let retainedBytes = 0;
     let truncated = false;
-    child.stdout?.on("data", (chunk: Buffer) => {
+    child.stdout.on("data", (chunk: Buffer) => {
       if (retainedBytes >= sessionstartDeliveryBytes) {
         truncated = true;
         return;
@@ -127,45 +118,36 @@ function runSessionstartHook(source: string): Promise<SessionstartOutput> {
       retainedBytes += retained.length;
       if (retained.length !== chunk.length) truncated = true;
     });
-    child.stdio[3]?.on("data", (chunk: Buffer) => {
-      if (replayMetadata.length < 64) replayMetadata += chunk.toString("utf8");
-    });
-    child.on("error", () => resolveResult({ content: "" }));
+    child.on("error", () => resolveResult(""));
     child.on("close", (code) => {
       if (code !== 0) {
-        resolveResult({ content: "" });
+        resolveResult("");
         return;
       }
       const raw = Buffer.concat(chunks).toString("utf8").trim();
-      const content = truncated ? `${raw}${sessionstartTruncatedMarker}` : raw;
-      const replayThrough = replayMetadata.trim();
-      resolveResult({
-        content,
-        branchReplayThrough: !truncated && /^[1-9][0-9]*$/.test(replayThrough) ? replayThrough : undefined,
-      });
+      resolveResult(truncated ? `${raw}${sessionstartTruncatedMarker}` : raw);
     });
   });
 }
 
 async function injectSessionstart(pi: ExtensionAPI, source: string): Promise<void> {
-  const output = await runSessionstartHook(source);
-  if (!output.content) return;
+  const raw = await runSessionstartHook(source);
+  if (!raw) return;
   try {
     // Pi is the only adapter that injects a MESSAGE rather than hook stdout, so
     // whatever it injects must carry operational provenance or the Ahoy skill
     // would have to guess whether it was captain-authored. The wrapper already
     // returns an encoded nudge on a context-preserving open, so only an
     // unencoded digest needs the marker added here.
-    const content = classifyFirstmateCurrentOperationalText(output.content)
-      ? output.content
-      : encodeFirstmateOperationalInput("session-start", output.content);
+    const content = classifyFirstmateCurrentOperationalText(raw)
+      ? raw
+      : encodeFirstmateOperationalInput("session-start", raw);
     pi.sendMessage({
       customType: "firstmate-sessionstart-nudge",
       content,
       display: false,
       details: { kind: "session-start" },
     });
-    if (output.branchReplayThrough) acknowledgeBranchReplay(output.branchReplayThrough);
   } catch {
   }
 }

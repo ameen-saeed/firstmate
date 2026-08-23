@@ -79,14 +79,7 @@ export function createBashToolDefinition(cwd, options) {
     parameters: { type: "object" },
     __cwd: cwd,
     __options: options,
-    execute: async () => {
-      if (globalThis.__fmBlockBash) {
-        await new Promise((resolve) => {
-          globalThis.__fmResolveBash = resolve;
-        });
-      }
-      return { content: [], details: undefined };
-    },
+    execute: async () => ({ content: [], details: undefined }),
   };
 }
 
@@ -99,12 +92,6 @@ export async function createAgentSession(options) {
     async prompt(text) {
       session.ops.push({ kind: "prompt", text });
       (globalThis.__fmPrompts ??= []).push(text);
-      if (globalThis.__fmBlockPrompt) {
-        await new Promise((resolve, reject) => {
-          session.resolvePrompt = resolve;
-          session.rejectPrompt = reject;
-        });
-      }
     },
     async sendCustomMessage(message, opts) {
       session.ops.push({ kind: "custom", message, opts });
@@ -112,8 +99,6 @@ export async function createAgentSession(options) {
     },
     dispose() {
       session.disposed = true;
-      session.rejectPrompt?.(new Error("stub session disposed"));
-      session.rejectPrompt = null;
     },
   };
   (globalThis.__fmSessions ??= []).push(session);
@@ -162,15 +147,18 @@ JS
 # captured main-bound messages.
 DRIVER_PRELUDE=$(cat <<'JS'
 const { spawnSync } = await import("node:child_process");
-const { mkdirSync, writeFileSync } = await import("node:fs");
+const { mkdirSync } = await import("node:fs");
 const { pathToFileURL } = await import("node:url");
 
 const home = process.env.FM_HOME;
 const realRoot = process.env.FM_ROOT_OVERRIDE;
 mkdirSync(`${home}/state`, { recursive: true });
 mkdirSync(`${home}/config`, { recursive: true });
-if (process.env.FM_TEST_NO_INITIAL_LOCK !== "1") {
-  writeFileSync(`${home}/state/.lock`, `${process.env.FM_TEST_LOCK_PID || process.pid}\n`);
+// The branch acts only for the session that owns the fleet lock; drivers own
+// it by default, while cold-start and secondary-session scenarios opt out.
+if (!process.env.FM_TEST_SKIP_LOCK) {
+  const { writeFileSync: writeLock } = await import("node:fs");
+  writeLock(`${home}/state/.lock`, `${process.pid}\n`);
 }
 
 const busHandlers = new Map();
@@ -201,18 +189,14 @@ const pi = {
     renderers.set(customType, renderer);
   },
   sendMessage(message, options) {
-    if (globalThis.__fmRejectMergeDelivery) throw new Error("main merge delivery failed");
     sentToMain.push({ message, options: options ?? {} });
   },
   sendUserMessage(content, options) {
-    globalThis.__fmMainDeliveryAttempts = (globalThis.__fmMainDeliveryAttempts ?? 0) + 1;
-    if (globalThis.__fmRejectMainDelivery) throw new Error("stale extension API");
-    if (globalThis.__fmRejectMainDeliveryAsync) return Promise.reject(new Error("async main delivery failed"));
     mainUserMessages.push({ content, options: options ?? {} });
   },
 };
-async function fire(event, payload, ctx) {
-  for (const handler of piHandlers.get(event) ?? []) await handler(payload, ctx);
+function fire(event, payload, ctx) {
+  for (const handler of piHandlers.get(event) ?? []) handler(payload, ctx);
 }
 function makeOffer(message) {
   const offer = {
@@ -260,10 +244,9 @@ test_branch_dispatch_two_stage_filter_and_prefix_contract() {
 const prelude = process.env.DRIVER_PRELUDE;
 await eval(`(async () => { ${prelude}; globalThis.__t = { pi, fire, dispatch, settle, outcomeScript, sentToMain, mainUserMessages, mainTools, renderers, home, realRoot }; })()`);
 const { fire, dispatch, settle, outcomeScript, sentToMain, mainUserMessages, mainTools, renderers, home, realRoot } = globalThis.__t;
-import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 
 // 1. An accepted wake reaches the branch session, never main.
-globalThis.__fmBlockPrompt = true;
 const offer = dispatch("signal: task-9 done: PR https://example.com/pr/9 checks green");
 if (!offer.accepted) throw new Error("branch did not accept the wake offer");
 await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "branch wake prompt");
@@ -285,46 +268,13 @@ for (const key of ["noExtensions", "noSkills", "noPromptTemplates", "noThemes", 
   if (loader.options[key] !== true) throw new Error(`branch loader must set ${key}`);
 }
 if (!loader.options.systemPrompt || !loader.options.systemPrompt.startsWith("You are the SUPERVISION BRANCH")) {
-  throw new Error("branch system prompt did not come from the generator");
+  throw new Error("branch system prompt is not the generator's output");
 }
 if (loader.options.systemPrompt.length < 4096) throw new Error("branch prompt is below the provider caching minimum");
 const bashTool = session.options.customTools.find((tool) => tool.name === "bash");
 const hooked = bashTool.__options.spawnHook({ command: "true", cwd: "/x", env: { PATH: "/bin" } });
 if (hooked.env.FM_SUPERVISION_ACTOR !== "branch") throw new Error("branch bash does not inject the branch actor");
 if (!/^[0-9]+$/.test(String(hooked.env.FM_LEASE_HOLDER_PID))) throw new Error("branch bash does not pin the lease holder pid");
-const { spawnSync } = await import("node:child_process");
-for (const command of [
-  "FM_SUPERVISION_ACTOR=main bin/fm-pr-merge.sh task-x https://example.com/pr/1",
-  "unset FM_SUPERVISION_ACTOR; bin/fm-pr-merge.sh task-x https://example.com/pr/1",
-  "env FM_SUPERVISION_ACTOR=main bin/fm-pr-merge.sh task-x https://example.com/pr/1",
-  "env -u FM_SUPERVISION_ACTOR -u FM_LEASE_GENERATION -u FM_PI_BRANCH_GENERATION bash bin/fm-pr-merge.sh task-x https://example.com/pr/1",
-  "env -u FM_SUPERVISION_ACTOR -u FM_LEASE_GENERATION -u FM_PI_BRANCH_GENERATION env FM_SUPERVISION_ACTOR=main bash bin/fm-pr-merge.sh task-x https://example.com/pr/1",
-  "rm -f $FM_STATE_OVERRIDE/.pi-branch-shell-*; env -u FM_SUPERVISION_ACTOR -u FM_LEASE_GENERATION -u FM_PI_BRANCH_GENERATION bash bin/fm-pr-merge.sh task-x https://example.com/pr/1",
-]) {
-  const fenced = bashTool.__options.spawnHook({ command, cwd: realRoot, env: { ...process.env, PATH: process.env.PATH } });
-  const attempt = spawnSync("bash", ["-c", fenced.command], { cwd: realRoot, encoding: "utf8", env: fenced.env });
-  if (attempt.status === 0 || !/(readonly variable|actor override refused|supervision branch never performs)/.test(attempt.stderr)) {
-    throw new Error(`branch actor override escaped its authority fence (${attempt.status}): ${command}\n${attempt.stderr}`);
-  }
-}
-const mainClaim = spawnSync("bash", ["bin/fm-lease.sh", "claim", "nested-release", "--actor", "main"], {
-  cwd: realRoot,
-  encoding: "utf8",
-  env: { ...process.env, FM_HOME: home, FM_STATE_OVERRIDE: `${home}/state`, FM_SUPERVISION_ACTOR: "main", FM_LEASE_HOLDER_PID: String(process.pid) },
-});
-if (mainClaim.status !== 0) throw new Error(`main lease fixture failed: ${mainClaim.stderr}`);
-const releaseCommand = "env -u FM_SUPERVISION_ACTOR -u FM_LEASE_GENERATION -u FM_PI_BRANCH_GENERATION bash bin/fm-lease.sh release nested-release --actor main";
-const fencedRelease = bashTool.__options.spawnHook({ command: releaseCommand, cwd: realRoot, env: { ...process.env, PATH: process.env.PATH } });
-const releaseAttempt = spawnSync("bash", ["-c", fencedRelease.command], { cwd: realRoot, encoding: "utf8", env: fencedRelease.env });
-if (releaseAttempt.status !== 6 || !/cannot release the main actor\x27s lease/.test(releaseAttempt.stderr)) {
-  throw new Error(`nested branch process escaped lease-release authorization (${releaseAttempt.status}): ${releaseAttempt.stderr}`);
-}
-const retained = spawnSync("bash", ["bin/fm-lease.sh", "check", "nested-release"], {
-  cwd: realRoot,
-  encoding: "utf8",
-  env: { ...process.env, FM_HOME: home, FM_STATE_OVERRIDE: `${home}/state` },
-});
-if (retained.status !== 0) throw new Error("nested branch release removed the main lease");
 
 // 3. Shared per-home prompt_cache_key: overrides only payloads that already
 // carry one, stable within the home.
@@ -343,62 +293,37 @@ if (untouched !== undefined) throw new Error("cache-key hook rewrote a provider 
 console.log(`CACHE_KEY=${rewriteA.prompt_cache_key}`);
 
 // 4. Two-stage filter, stage 2: routine while main is idle appends with no
-// turn; routine while main is busy defers until after the next captain prompt;
+// turn; routine while main is busy defers to after the captain's next prompt;
 // captain-relevant appends and triggers exactly one turn. Store rows are
 // written BEFORE the merge note and marked read after it.
 const report = session.options.customTools.find((tool) => tool.name === "fm_branch_report");
-const r1 = await report.execute("call-1", { task: "task-9", verdict: "routine", summary: "worker healthy, no action needed", wake: "signal: working", wakeSequence: 1 }, undefined, undefined, {});
+const r1 = await report.execute("call-1", { task: "task-9", verdict: "routine", summary: "worker healthy, no action needed", wake: "signal: working" }, undefined, undefined, {});
 if (r1.isError) throw new Error(`routine report failed: ${JSON.stringify(r1)}`);
 if (sentToMain.length !== 1) throw new Error("routine report did not merge exactly one note");
 if (sentToMain[0].message.customType !== "fm-branch-merge") throw new Error("merge note has the wrong custom type");
 if (sentToMain[0].options.triggerTurn) throw new Error("routine idle merge must not trigger a turn");
 if (sentToMain[0].options.deliverAs) throw new Error("routine idle merge must append immediately");
 fire("agent_start", {});
-await report.execute("call-2", { task: "task-9", verdict: "routine", summary: "still healthy", wakeSequence: 2 }, undefined, undefined, {});
+await report.execute("call-2", { task: "task-9", verdict: "routine", summary: "still healthy" }, undefined, undefined, {});
 if (sentToMain[1].options.deliverAs !== "nextTurn" || sentToMain[1].options.triggerTurn) {
   throw new Error(`routine busy merge must defer to nextTurn without a turn: ${JSON.stringify(sentToMain[1].options)}`);
 }
 fire("agent_end", {});
-await report.execute("call-3", { task: "task-9", verdict: "captain", summary: "PR https://example.com/pr/9 checks green, ready for review", wakeSequence: 3 }, undefined, undefined, {});
+await report.execute("call-3", { task: "task-9", verdict: "captain", summary: "PR https://example.com/pr/9 checks green, ready for review" }, undefined, undefined, {});
 if (sentToMain[2].options.triggerTurn !== true || sentToMain[2].options.deliverAs !== "followUp") {
   throw new Error(`captain merge must trigger exactly one follow-up turn: ${JSON.stringify(sentToMain[2].options)}`);
 }
 if (!sentToMain[2].message.content.includes("[captain] task-9: PR https://example.com/pr/9")) {
   throw new Error(`captain note lost its content: ${sentToMain[2].message.content}`);
 }
-const duplicate = await report.execute("call-duplicate", {
-  task: "task-9",
-  verdict: "captain",
-  summary: "duplicate captain escalation",
-  wakeSequence: 3,
-}, undefined, undefined, {});
-if (!duplicate.isError || !duplicate.content[0].text.includes("duplicate report")) {
-  throw new Error(`duplicate wake report was not rejected: ${JSON.stringify(duplicate)}`);
-}
-if (sentToMain.length !== 3) throw new Error("duplicate wake report merged another main note");
-if (sentToMain.filter((item) => item.options.triggerTurn === true).length !== 1) {
-  throw new Error("duplicate wake report triggered another captain turn");
-}
 
-// The store (the owned durable contract) holds all three outcomes in order.
+// The store (the owned durable contract) holds all three outcomes in order,
+// and each merged note advanced the read cursor.
 const rows = readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8").trim().split("\n").map((line) => JSON.parse(line));
 if (rows.length !== 3) throw new Error(`expected 3 store rows, got ${rows.length}`);
 if (rows[0].verdict !== "routine" || rows[2].verdict !== "captain") throw new Error("store verdicts out of order");
 if (rows[0].wake !== "signal: working") throw new Error("store lost the wake reason");
-if (outcomeScript(["unread"]).split("\n").length !== 3) {
-  throw new Error("queued merge notes advanced the outcome cursor before main-session delivery");
-}
-const deliveredEntries = sentToMain.map(({ message }) => ({
-  type: "message",
-  message: { role: "custom", ...message },
-}));
-await fire("turn_end", {}, {
-  sessionManager: {
-    getSessionFile: () => `${home}/main.jsonl`,
-    getEntries: () => deliveredEntries,
-  },
-});
-if (outcomeScript(["unread"]) !== "") throw new Error("delivered merge notes did not advance the outcome cursor");
+if (outcomeScript(["unread"]) !== "") throw new Error("merged outcomes were not marked read");
 
 // 5. Main-side surfaces: the on-demand store reader tool and the merge-note
 // renderer.
@@ -412,33 +337,6 @@ if (listedText.split("\n").length !== 2 || !listedText.includes("checks green"))
 if (!renderers.has("fm-branch-merge")) throw new Error("merge-note renderer missing");
 const rendered = renderers.get("fm-branch-merge")({ content: "note body" }, { expanded: false }, { fg: (_c, text) => text });
 if (rendered.text !== "note body") throw new Error("merge-note renderer dropped the note");
-mkdirSync(`${home}/state/branch-ack-receipts`, { recursive: true });
-writeFileSync(`${home}/state/branch-ack-receipts/receipt-test`, "1\n2\n3\n");
-session.resolvePrompt();
-await settle(
-  () => !readdirSync(`${home}/state/branch-pending-wakes`).some((name) => name.endsWith(".json")),
-  "reported wake completion",
-);
-if (mainUserMessages.length !== 0) throw new Error("durably reported wake fell back to main");
-if (!dispatch("signal: redelivered wake row").accepted) throw new Error("redelivered wake was not accepted");
-await settle(() => (globalThis.__fmPrompts ?? []).length === 2, "redelivered wake prompt");
-const reused = await report.execute("call-reused", {
-  task: "task-9",
-  verdict: "captain",
-  summary: "must not replace the original outcome",
-  wakeSequence: 1,
-}, undefined, undefined, {});
-if (reused.isError) throw new Error(`existing wake outcome was not reusable: ${JSON.stringify(reused)}`);
-if (sentToMain.length !== 3) throw new Error("existing wake outcome produced another main merge");
-if (readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8").trim().split("\n").length !== 3) {
-  throw new Error("existing wake outcome appended another durable row");
-}
-writeFileSync(`${home}/state/branch-ack-receipts/receipt-reused`, "1\n");
-session.resolvePrompt();
-await settle(
-  () => !readdirSync(`${home}/state/branch-pending-wakes`).some((name) => name.endsWith(".json")),
-  "reused wake completion",
-);
 process.exit(0);
 EOF
   )
@@ -491,7 +389,6 @@ test_branch_gating_config_afk_and_fallback() {
   home="$TMP_ROOT/gating-home"
   mkdir -p "$home/state" "$home/config" "$broken/bin"
   install_pi_branch_extension_fixture "$repo"
-  cp "$ROOT/bin/fm-lease.sh" "$ROOT/bin/fm-lease-lib.sh" "$ROOT/bin/fm-wake-lib.sh" "$broken/bin/"
   cat > "$broken/bin/fm-branch-prompt.sh" <<'SH'
 #!/usr/bin/env bash
 echo "synthetic generator failure" >&2
@@ -505,7 +402,7 @@ await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, settle, home
 const { dispatch, settle, home } = globalThis.__t;
 import { rmSync, writeFileSync } from "node:fs";
 
-// Disabled by config: the existing wake-to-main path keeps the wake.
+// Disabled by config: today's wake-to-main path keeps the wake.
 writeFileSync(`${home}/config/pi-supervision-branch`, "off\n");
 if (dispatch("signal: while disabled").accepted) throw new Error("disabled branch accepted a wake");
 
@@ -530,7 +427,7 @@ const prelude = process.env.DRIVER_PRELUDE;
 await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, settle, mainUserMessages }; })()`);
 const { dispatch, settle, mainUserMessages } = globalThis.__t;
 
-// A branch that cannot come up must degrade to the existing behavior: the accepted
+// A branch that cannot come up must degrade to today's behavior: the accepted
 // wake falls back to main with the failure named, and later wakes are no
 // longer accepted (no wake is ever lost).
 if (!dispatch("signal: first wake").accepted) throw new Error("first offer was not accepted");
@@ -546,424 +443,6 @@ EOF
   status=$?
   expect_code 0 "$status" "broken-branch fallback must return wakes to main: $out"
   pass "branch gating (config, afk) binds and a broken branch falls back to main"
-}
-
-test_completed_wake_without_report_falls_back() {
-  local repo home out status
-  repo="$TMP_ROOT/missing-report-root"
-  home="$TMP_ROOT/missing-report-home"
-  mkdir -p "$home/state" "$home/config"
-  install_pi_branch_extension_fixture "$repo"
-  out=$(PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module 2>&1 <<'EOF'
-const prelude = process.env.DRIVER_PRELUDE;
-await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, settle, mainUserMessages, home }; })()`);
-const { dispatch, settle, mainUserMessages, home } = globalThis.__t;
-import { existsSync, readFileSync, readdirSync } from "node:fs";
-if (!dispatch("signal: branch omitted its report").accepted) throw new Error("wake was not accepted");
-await settle(() => mainUserMessages.length === 1, "missing-report fallback");
-if (!mainUserMessages[0].content.includes("completed without a durable outcome report")) {
-  throw new Error("fallback did not identify the missing durable report");
-}
-if (existsSync(`${home}/state/branch-outcomes.jsonl`) && readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8").trim()) {
-  throw new Error("missing report unexpectedly produced a durable outcome");
-}
-if (readdirSync(`${home}/state/branch-pending-wakes`).some((name) => name.endsWith(".json"))) {
-  throw new Error("successful fallback left the accepted wake marker pending");
-}
-process.exit(0);
-EOF
-  )
-  status=$?
-  expect_code 0 "$status" "a completed wake without a report must fall back: $out"
-  pass "a completed branch wake without a durable report falls back to main"
-}
-
-test_async_fallback_rejection_retains_wake_for_replay() {
-  local repo home out status
-  repo="$TMP_ROOT/async-fallback-root"
-  home="$TMP_ROOT/async-fallback-home"
-  mkdir -p "$home/state" "$home/config"
-  install_pi_branch_extension_fixture "$repo"
-  out=$(PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module 2>&1 <<'EOF'
-const prelude = process.env.DRIVER_PRELUDE;
-await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, mainUserMessages, home }; })()`);
-const { fire, dispatch, settle, mainUserMessages, home } = globalThis.__t;
-import { readdirSync } from "node:fs";
-globalThis.__fmRejectMainDeliveryAsync = true;
-if (!dispatch("signal: async fallback rejection").accepted) throw new Error("wake was not accepted");
-await settle(() => (globalThis.__fmMainDeliveryAttempts ?? 0) === 1, "rejected async fallback attempt");
-if (mainUserMessages.length !== 0) throw new Error("rejected async fallback appeared delivered");
-const pending = () => readdirSync(`${home}/state/branch-pending-wakes`).filter((name) => name.endsWith(".json"));
-if (pending().length !== 1) throw new Error("rejected async fallback deleted its durable wake marker");
-globalThis.__fmRejectMainDeliveryAsync = false;
-const ctx = { sessionManager: { getSessionFile: () => "main.jsonl", getEntries: () => [] } };
-await fire("session_shutdown", {}, ctx);
-await fire("session_start", {}, ctx);
-await settle(() => mainUserMessages.length === 1, "replacement-session wake replay");
-await settle(() => pending().length === 0, "delivered replay marker cleanup");
-if (!mainUserMessages[0].content.includes("signal: async fallback rejection")) {
-  throw new Error("replacement replay lost the retained wake");
-}
-process.exit(0);
-EOF
-  )
-  status=$?
-  expect_code 0 "$status" "async fallback rejection must retain its accepted wake: $out"
-  pass "async fallback rejection retains the wake until replacement replay"
-}
-
-test_completed_wake_without_ack_falls_back() {
-  local repo home out status
-  repo="$TMP_ROOT/missing-ack-root"
-  home="$TMP_ROOT/missing-ack-home"
-  mkdir -p "$home/state" "$home/config"
-  install_pi_branch_extension_fixture "$repo"
-  out=$(PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module 2>&1 <<'EOF'
-const prelude = process.env.DRIVER_PRELUDE;
-await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, settle, mainUserMessages }; })()`);
-const { dispatch, settle, mainUserMessages } = globalThis.__t;
-globalThis.__fmBlockPrompt = true;
-if (!dispatch("signal: branch omitted acknowledgement").accepted) throw new Error("wake was not accepted");
-await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "missing-ack prompt");
-const session = globalThis.__fmSessions[0];
-const report = session.options.customTools.find((tool) => tool.name === "fm_branch_report");
-const result = await report.execute("missing-ack", { task: "task-a", verdict: "routine", summary: "handled", wakeSequence: 0 });
-if (result.isError) throw new Error("durable report failed");
-session.resolvePrompt();
-await settle(() => mainUserMessages.length === 1, "missing-ack fallback");
-if (!mainUserMessages[0].content.includes("without acknowledging its reported wake batch")) {
-  throw new Error("missing acknowledgement did not preserve fallback to main");
-}
-process.exit(0);
-EOF
-  )
-  status=$?
-  expect_code 0 "$status" "a completed wake without acknowledgement must fall back: $out"
-  pass "a completed branch wake without acknowledgement falls back to main"
-}
-
-test_partial_ack_preserves_wake_fallback() {
-  local repo home out status
-  repo="$TMP_ROOT/partial-ack-root"
-  home="$TMP_ROOT/partial-ack-home"
-  mkdir -p "$home/state" "$home/config"
-  install_pi_branch_extension_fixture "$repo"
-  out=$(PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module 2>&1 <<'EOF'
-const prelude = process.env.DRIVER_PRELUDE;
-await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, settle, mainUserMessages, home }; })()`);
-const { dispatch, settle, mainUserMessages, home } = globalThis.__t;
-import { mkdirSync, writeFileSync } from "node:fs";
-globalThis.__fmBlockPrompt = true;
-if (!dispatch("signal: partial acknowledgement").accepted) throw new Error("wake was not accepted");
-await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "partial-ack prompt");
-const session = globalThis.__fmSessions[0];
-const report = session.options.customTools.find((tool) => tool.name === "fm_branch_report");
-for (const wakeSequence of [1, 2, 3]) {
-  const result = await report.execute(`report-${wakeSequence}`, {
-    task: `task-${wakeSequence}`,
-    verdict: "routine",
-    summary: "handled",
-    wakeSequence,
-  });
-  if (result.isError) throw new Error(`report ${wakeSequence} failed`);
-}
-mkdirSync(`${home}/state/branch-ack-receipts`, { recursive: true });
-writeFileSync(`${home}/state/branch-ack-receipts/receipt-partial`, "1\n2\n");
-session.resolvePrompt();
-await settle(() => mainUserMessages.length === 1, "partial-ack fallback");
-if (!mainUserMessages[0].content.includes("without acknowledging its reported wake batch")) {
-  throw new Error("partial acknowledgement cleared the accepted wake marker");
-}
-process.exit(0);
-EOF
-  )
-  status=$?
-  expect_code 0 "$status" "a partial acknowledgement must preserve fallback: $out"
-  pass "a partial acknowledgement cannot clear the accepted wake marker"
-}
-
-test_failed_merge_preserves_wake_fallback() {
-  local repo home out status
-  repo="$TMP_ROOT/merge-failure-root"
-  home="$TMP_ROOT/merge-failure-home"
-  mkdir -p "$home/state" "$home/config"
-  install_pi_branch_extension_fixture "$repo"
-  out=$(PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module 2>&1 <<'EOF'
-const prelude = process.env.DRIVER_PRELUDE;
-await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, settle, mainUserMessages, sentToMain, home }; })()`);
-const { dispatch, settle, mainUserMessages, sentToMain, home } = globalThis.__t;
-import { readFileSync } from "node:fs";
-globalThis.__fmBlockPrompt = true;
-if (!dispatch("signal: merge delivery failure").accepted) throw new Error("wake was not accepted");
-await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "merge-failure prompt");
-const session = globalThis.__fmSessions[0];
-const report = session.options.customTools.find((tool) => tool.name === "fm_branch_report");
-globalThis.__fmRejectMergeDelivery = true;
-try {
-  await report.execute("failed-merge", { task: "task-x", verdict: "routine", summary: "handled", wakeSequence: 1 });
-} catch {}
-globalThis.__fmRejectMergeDelivery = false;
-session.resolvePrompt();
-await settle(() => mainUserMessages.length === 1, "failed-merge fallback");
-if (sentToMain.length !== 0) throw new Error("failed merge was recorded as delivered");
-if (!mainUserMessages[0].content.includes("without a durable outcome report")) {
-  throw new Error("failed merge did not preserve fallback to main");
-}
-const rows = readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8").trim().split("\n");
-if (rows.length !== 1) throw new Error("store-first outcome was not preserved after merge failure");
-process.exit(0);
-EOF
-  )
-  status=$?
-  expect_code 0 "$status" "a failed main merge must preserve wake fallback: $out"
-  pass "a failed main merge preserves the durable outcome and wake fallback"
-}
-
-test_accepted_wakes_fall_back_during_shutdown() {
-  local repo home out status
-  repo="$TMP_ROOT/shutdown-root"
-  home="$TMP_ROOT/shutdown-home"
-  mkdir -p "$home/state" "$home/config"
-  install_pi_branch_extension_fixture "$repo"
-  out=$(PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module 2>&1 <<'EOF'
-const prelude = process.env.DRIVER_PRELUDE;
-await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, mainUserMessages, home }; })()`);
-const { fire, dispatch, settle, mainUserMessages, home } = globalThis.__t;
-globalThis.__fmBlockPrompt = true;
-if (!dispatch("signal: active during shutdown").accepted) throw new Error("active wake was not accepted");
-if (!dispatch("signal: queued during shutdown").accepted) throw new Error("queued wake was not accepted");
-await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "active branch prompt");
-const { readFileSync } = await import("node:fs");
-const { spawnSync } = await import("node:child_process");
-const generation = readFileSync(`${home}/state/.pi-branch-generation`, "utf8").trim();
-const bashTool = globalThis.__fmSessions[0].options.customTools.find((tool) => tool.name === "bash");
-globalThis.__fmBlockBash = true;
-const bashRun = bashTool.execute("bash-call", { command: "long lifecycle action" });
-await settle(() => typeof globalThis.__fmResolveBash === "function", "active branch bash tool");
-const claim = spawnSync("bash", [`${process.env.FM_ROOT_OVERRIDE}/bin/fm-lease.sh`, "claim", "shutdown-task", "--actor", "branch"], {
-  encoding: "utf8",
-  env: { ...process.env, FM_HOME: home, FM_STATE_OVERRIDE: `${home}/state`, FM_SUPERVISION_ACTOR: "branch", FM_LEASE_HOLDER_PID: String(process.pid), FM_LEASE_GENERATION: generation },
-});
-if (claim.status !== 0) throw new Error(`branch fixture lease claim failed: ${claim.stderr}`);
-const sessionCtx = {
-  sessionManager: { getSessionFile: () => `${home}/main.jsonl`, getEntries: () => [] },
-};
-globalThis.__fmRejectMainDelivery = true;
-let shutdownFinished = false;
-const shutdown = fire("session_shutdown", {}, sessionCtx).then(() => { shutdownFinished = true; });
-await new Promise((resolve) => setTimeout(resolve, 30));
-if (shutdownFinished) throw new Error("session shutdown completed before branch tools quiesced");
-if (mainUserMessages.length !== 0) throw new Error("shutdown used the invalidated extension API");
-const { existsSync, readdirSync } = await import("node:fs");
-if (!existsSync(`${home}/state/.lease-shutdown-task`)) throw new Error("shutdown released a lease before its tool quiesced");
-globalThis.__fmResolveBash();
-await bashRun;
-await shutdown;
-globalThis.__fmRejectMainDelivery = false;
-await fire("session_start", {}, sessionCtx);
-await settle(() => mainUserMessages.length === 2, "replacement-session fallbacks");
-const delivered = mainUserMessages.map((item) => item.content).join("\n");
-if (!delivered.includes("signal: active during shutdown")) throw new Error("active accepted wake was lost");
-if (!delivered.includes("signal: queued during shutdown")) throw new Error("queued accepted wake was lost");
-if (mainUserMessages.some((item) => item.options.deliverAs !== "followUp")) {
-  throw new Error("shutdown fallback must deliver as a follow-up");
-}
-if (readFileSync(`${home}/state/.pi-branch-generation`, "utf8").trim() === generation) {
-  throw new Error("shutdown did not invalidate the disposed branch generation");
-}
-if (existsSync(`${home}/state/.lease-shutdown-task`)) throw new Error("shutdown left a quiesced branch lease wedged");
-if (readdirSync(`${home}/state/branch-pending-wakes`).some((name) => name.endsWith(".json"))) {
-  throw new Error("replacement-session fallback left accepted wake markers unread");
-}
-process.exit(0);
-EOF
-  )
-  status=$?
-  expect_code 0 "$status" "accepted wakes must fall back during session shutdown: $out"
-  pass "accepted active and queued wakes fall back to main during session shutdown"
-}
-
-test_cleanup_failure_still_replays_accepted_wakes() {
-  local repo home broken out status
-  repo="$TMP_ROOT/cleanup-failure-plugin"
-  home="$TMP_ROOT/cleanup-failure-home"
-  broken="$TMP_ROOT/cleanup-failure-root"
-  mkdir -p "$home/state" "$home/config" "$broken"
-  install_pi_branch_extension_fixture "$repo"
-  cp -R "$ROOT/bin" "$broken/bin"
-  cp -R "$ROOT/.agents" "$broken/.agents"
-  mv "$broken/bin/fm-lease.sh" "$broken/bin/fm-lease-real.sh"
-  cat > "$broken/bin/fm-lease.sh" <<'SH'
-#!/usr/bin/env bash
-if [ -e "${FM_STATE_OVERRIDE:?}/.fail-lease-cleanup" ]; then
-  exit 1
-fi
-exec "$(dirname "$0")/fm-lease-real.sh" "$@"
-SH
-  chmod +x "$broken/bin/fm-lease.sh"
-  out=$(PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$broken" \
-    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module 2>&1 <<'EOF'
-const prelude = process.env.DRIVER_PRELUDE;
-await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, mainUserMessages, home }; })()`);
-const { fire, dispatch, settle, mainUserMessages, home } = globalThis.__t;
-globalThis.__fmBlockPrompt = true;
-if (!dispatch("signal: cleanup failure wake").accepted) throw new Error("wake was not accepted");
-await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "cleanup-failure prompt");
-const sessionCtx = {
-  sessionManager: { getSessionFile: () => "main.jsonl", getEntries: () => [] },
-};
-const { writeFileSync } = await import("node:fs");
-writeFileSync(`${home}/state/.fail-lease-cleanup`, "");
-await fire("session_shutdown", {}, sessionCtx);
-await fire("session_start", {}, sessionCtx);
-await settle(() => mainUserMessages.length === 1, "cleanup-failure fallback");
-if (!mainUserMessages[0].content.includes("signal: cleanup failure wake")) {
-  throw new Error("lease cleanup failure stranded the accepted wake");
-}
-if (dispatch("signal: branch must remain disabled").accepted) {
-  throw new Error("branch dispatch resumed after lease cleanup failure");
-}
-process.exit(0);
-EOF
-  )
-  status=$?
-  expect_code 0 "$status" "lease cleanup failure must still replay accepted wakes: $out"
-  pass "lease cleanup failure replays accepted wakes while branch dispatch stays disabled"
-}
-
-test_cold_start_activates_after_lock_acquisition() {
-  local repo home out status
-  repo="$TMP_ROOT/cold-start-root"
-  home="$TMP_ROOT/cold-start-home"
-  mkdir -p "$home/state" "$home/config"
-  install_pi_branch_extension_fixture "$repo"
-  out=$(PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    FM_TEST_NO_INITIAL_LOCK=1 DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module 2>&1 <<'EOF'
-const prelude = process.env.DRIVER_PRELUDE;
-await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, home }; })()`);
-const { fire, dispatch, settle, home } = globalThis.__t;
-import { existsSync, writeFileSync } from "node:fs";
-const ctx = { sessionManager: { getSessionFile: () => "cold.jsonl", getEntries: () => [] } };
-await fire("session_start", {}, ctx);
-if (existsSync(`${home}/state/.pi-branch-extension-loaded`)) {
-  throw new Error("a no-lock session activated branch supervision");
-}
-if (dispatch("signal: no-lock offer").accepted) throw new Error("a no-lock session accepted a branch wake");
-writeFileSync(`${home}/state/.lock`, `${process.pid}\n`);
-globalThis.__fmBlockPrompt = true;
-if (!dispatch("signal: post-lock offer").accepted) {
-  throw new Error("cold-start branch did not activate after lock acquisition");
-}
-await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "post-lock branch prompt");
-if (!existsSync(`${home}/state/.pi-branch-extension-loaded`)) {
-  throw new Error("post-lock activation did not publish the branch marker");
-}
-process.exit(0);
-EOF
-  )
-  status=$?
-  expect_code 0 "$status" "cold-start branch must activate lazily after lock acquisition: $out"
-  pass "cold-start branch activates after lock acquisition while no-lock sessions stay inactive"
-}
-
-test_secondary_session_cannot_mutate_primary_branch_state() {
-  local repo home out status owner
-  repo="$TMP_ROOT/secondary-session-root"
-  home="$TMP_ROOT/secondary-session-home"
-  mkdir -p "$home/state" "$home/config"
-  install_pi_branch_extension_fixture "$repo"
-  sleep 30 &
-  owner=$!
-  printf 'primary-marker\n' > "$home/state/.pi-branch-extension-loaded"
-  FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_LEASE_HOLDER_PID="$owner" "$ROOT/bin/fm-lease.sh" claim primary-task --actor branch \
-    || fail "could not seed the primary branch lease"
-  out=$(PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    FM_TEST_LOCK_PID="$owner" DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module 2>&1 <<'EOF'
-const prelude = process.env.DRIVER_PRELUDE;
-await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, home }; })()`);
-const { fire, dispatch, home } = globalThis.__t;
-import { existsSync, readFileSync } from "node:fs";
-const markerBefore = readFileSync(`${home}/state/.pi-branch-extension-loaded`, "utf8");
-const ctx = { sessionManager: { getSessionFile: () => "secondary.jsonl", getEntries: () => [] } };
-await fire("session_start", {}, ctx);
-await fire("turn_end", {}, ctx);
-if (dispatch("signal: secondary offer").accepted) throw new Error("secondary session accepted a branch wake");
-if (!existsSync(`${home}/state/.lease-primary-task`)) throw new Error("secondary session released the primary lease");
-if (readFileSync(`${home}/state/.pi-branch-extension-loaded`, "utf8") !== markerBefore) {
-  throw new Error("secondary session rewrote the primary branch marker");
-}
-process.exit(0);
-EOF
-  )
-  status=$?
-  kill "$owner" 2>/dev/null || true
-  wait "$owner" 2>/dev/null || true
-  expect_code 0 "$status" "secondary Pi session must not mutate primary branch state: $out"
-  pass "a secondary Pi session cannot mutate primary branch state"
-}
-
-test_rebind_recollects_undelivered_mirror() {
-  local repo home out status
-  repo="$TMP_ROOT/mirror-rebind-root"
-  home="$TMP_ROOT/mirror-rebind-home"
-  mkdir -p "$home/state" "$home/config"
-  install_pi_branch_extension_fixture "$repo"
-  out=$(PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module 2>&1 <<'EOF'
-const prelude = process.env.DRIVER_PRELUDE;
-await eval(`(async () => { ${prelude}; globalThis.__t = { pi, fire, dispatch, settle, home }; })()`);
-const { pi, fire, dispatch, settle, home } = globalThis.__t;
-import { existsSync } from "node:fs";
-import { pathToFileURL } from "node:url";
-const entries = [
-  { type: "message", message: { role: "user", content: "retain this undelivered standing order" } },
-  { type: "message", message: { role: "assistant", content: "standing order retained" } },
-];
-const ctx = {
-  sessionManager: {
-    getSessionFile: () => `${home}/main-reload.jsonl`,
-    getEntries: () => entries,
-  },
-};
-await fire("turn_end", {}, ctx);
-if ((globalThis.__fmSessions ?? []).length !== 0) throw new Error("turn_end unexpectedly created the branch");
-if (existsSync(`${home}/state/.branch-mirror-cursor`)) {
-  throw new Error("undelivered mirror advanced the durable cursor");
-}
-await fire("session_shutdown", {}, ctx);
-const rebound = await import(pathToFileURL(process.env.PLUGIN).href);
-rebound.default(pi);
-await fire("turn_end", {}, ctx);
-globalThis.__fmBlockPrompt = true;
-if (!dispatch("signal: after extension rebind").accepted) throw new Error("rebound branch refused the wake");
-await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "rebound branch prompt");
-const session = globalThis.__fmSessions[0];
-const operations = session.ops.map((operation) => operation.kind);
-if (JSON.stringify(operations) !== JSON.stringify(["custom", "custom", "prompt"])) {
-  throw new Error(`rebound mirror did not land before the wake: ${JSON.stringify(operations)}`);
-}
-const mirrored = session.ops.filter((operation) => operation.kind === "custom").map((operation) => operation.message.content);
-if (JSON.stringify(mirrored) !== JSON.stringify([
-  "[captain] retain this undelivered standing order",
-  "[main] standing order retained",
-])) {
-  throw new Error(`rebound mirror lost undelivered dialog: ${JSON.stringify(mirrored)}`);
-}
-if (!existsSync(`${home}/state/.branch-mirror-cursor`)) {
-  throw new Error("rebound delivery did not advance the durable cursor");
-}
-process.exit(0);
-EOF
-  )
-  status=$?
-  expect_code 0 "$status" "extension rebind must recollect undelivered mirror context: $out"
-  pass "extension rebind recollects undelivered dialog from the durable cursor"
 }
 
 test_branch_mirror_filters_order_and_cursor() {
@@ -995,7 +474,7 @@ const ctx = {
   },
 };
 
-// Dialog collected at main turn_end, delivered into the branch BEFORE the
+// Dialog collected at main's turn_end, delivered into the branch BEFORE the
 // next wake, tagged and filtered: no tool traffic, no operational injections,
 // no merge notes, long messages capped.
 fire("turn_end", {}, ctx);
@@ -1085,18 +564,159 @@ EOF
   pass "branch session persists across process restarts through the recorded pointer"
 }
 
+test_cold_start_activates_after_lock_acquisition() {
+  local repo home out status
+  repo="$TMP_ROOT/coldstart-root"
+  home="$TMP_ROOT/coldstart-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  out=$(PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_TEST_SKIP_LOCK=1 DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, settle, home }; })()`);
+const { dispatch, settle, home } = globalThis.__t;
+import { existsSync, writeFileSync } from "node:fs";
+
+// An ordinary cold Pi start: session_start fires BEFORE the session acquires
+// the fleet lock (fm-sessionstart-run.sh acquires it later). Ownership must
+// be evaluated lazily per action, never latched at session_start.
+if (dispatch("signal: before lock").accepted) throw new Error("branch accepted a wake before the lock existed");
+if (existsSync(`${home}/state/.pi-branch-extension-loaded`)) {
+  throw new Error("branch wrote its marker before owning the lock");
+}
+writeFileSync(`${home}/state/.lock`, `${process.pid}\n`);
+if (!dispatch("signal: after lock").accepted) throw new Error("branch refused a wake after the lock was acquired");
+await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "post-lock branch wake prompt");
+if (!existsSync(`${home}/state/.pi-branch-extension-loaded`)) {
+  throw new Error("owned activation did not write the diagnostic marker");
+}
+process.exit(0);
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "cold-start lazy lock-ownership activation must hold: $out"
+  pass "branch activates on a cold start once the lock is acquired, never before"
+}
+
+test_secondary_session_stays_inert() {
+  local repo home out status foreign_pid
+  repo="$TMP_ROOT/secondary-root"
+  home="$TMP_ROOT/secondary-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  # The fleet lock is owned by ANOTHER live process that is NOT in the
+  # driver's ancestry (a sibling sleeper), so the driver is a secondary
+  # session: it must accept nothing, write no marker, and release no leases.
+  sleep 60 &
+  foreign_pid=$!
+  printf 'branch\t%s\t123\n' "$foreign_pid" > "$home/state/.lease-task-x"
+  out=$(PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_TEST_SKIP_LOCK=1 FM_TEST_LOCK_PID=$foreign_pid DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, home }; })()`);
+const { dispatch, home } = globalThis.__t;
+import { existsSync, writeFileSync } from "node:fs";
+writeFileSync(`${home}/state/.lock`, `${process.env.FM_TEST_LOCK_PID}\n`);
+if (dispatch("signal: secondary probe").accepted) throw new Error("secondary session accepted a wake it does not own");
+if (existsSync(`${home}/state/.pi-branch-extension-loaded`)) {
+  throw new Error("secondary session wrote the primary's marker");
+}
+if (!existsSync(`${home}/state/.lease-task-x`)) {
+  throw new Error("secondary session released the primary's branch lease");
+}
+process.exit(0);
+EOF
+  )
+  status=$?
+  kill "$foreign_pid" 2>/dev/null || true
+  expect_code 0 "$status" "a secondary session must stay inert: $out"
+  pass "a Pi session that does not own the lock accepts nothing and mutates no branch state"
+}
+
+test_rebind_remirrors_undelivered_dialog_from_durable_cursor() {
+  local repo home out status
+  repo="$TMP_ROOT/rebind-root"
+  home="$TMP_ROOT/rebind-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  out=$(PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, home }; })()`);
+const { fire, home } = globalThis.__t;
+import { pathToFileURL } from "node:url";
+
+// Instance A collects dialog at turn_end while no branch exists yet (nothing
+// delivered, durable cursor unmoved), then the extension instance is replaced
+// (/new, /resume, reload). The replacement must reconstruct exclusively from
+// the durable cursor and re-mirror the undelivered dialog - never drop it.
+const entries = [
+  { type: "message", message: { role: "user", content: "standing order: never merge task-7" } },
+];
+const ctx = {
+  sessionManager: { getSessionFile: () => `${home}/main-1.jsonl`, getEntries: () => entries },
+};
+fire("turn_end", {}, ctx);
+fire("session_shutdown", {});
+
+// Replacement instance: fresh import simulates Pi rebinding the extension.
+const replacementHandlers = new Map();
+const replacementBus = {
+  on(channel, handler) {
+    replacementHandlers.set(channel, [...(replacementHandlers.get(channel) ?? []), handler]);
+    return () => {};
+  },
+  emit(channel, data) {
+    for (const handler of replacementHandlers.get(channel) ?? []) handler(data);
+  },
+};
+const replacementPiHandlers = new Map();
+const replacementPi = {
+  events: replacementBus,
+  on(event, handler) {
+    replacementPiHandlers.set(event, [...(replacementPiHandlers.get(event) ?? []), handler]);
+  },
+  registerTool() {},
+  registerCommand() {},
+  registerMessageRenderer() {},
+  sendMessage() {},
+  sendUserMessage() {},
+};
+const replacement = await import(`${pathToFileURL(process.env.PLUGIN).href}?rebind=1`);
+replacement.default(replacementPi);
+for (const handler of replacementPiHandlers.get("session_start") ?? []) handler({}, ctx);
+for (const handler of replacementPiHandlers.get("turn_end") ?? []) handler({}, ctx);
+const offer = {
+  message: "signal: after rebind",
+  accepted: false,
+  accept() {
+    offer.accepted = true;
+  },
+};
+replacementBus.emit("fm-branch-supervision:dispatch", offer);
+if (!offer.accepted) throw new Error("replacement instance refused the wake");
+for (let i = 0; i < 250; i += 1) {
+  const mirrors = (globalThis.__fmMirrors ?? []).map((m) => m.content);
+  if (mirrors.includes("[captain] standing order: never merge task-7")) break;
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+const mirrors = (globalThis.__fmMirrors ?? []).map((m) => m.content);
+if (!mirrors.includes("[captain] standing order: never merge task-7")) {
+  throw new Error(`replacement dropped undelivered dialog: ${JSON.stringify(mirrors)}`);
+}
+process.exit(0);
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "rebind must re-mirror undelivered dialog from the durable cursor: $out"
+  pass "an extension rebind re-mirrors undelivered dialog instead of dropping it"
+}
+
 test_branch_dispatch_two_stage_filter_and_prefix_contract
 test_branch_cache_key_is_per_home_stable
 test_branch_gating_config_afk_and_fallback
-test_completed_wake_without_report_falls_back
-test_async_fallback_rejection_retains_wake_for_replay
-test_completed_wake_without_ack_falls_back
-test_partial_ack_preserves_wake_fallback
-test_failed_merge_preserves_wake_fallback
-test_accepted_wakes_fall_back_during_shutdown
-test_cleanup_failure_still_replays_accepted_wakes
-test_cold_start_activates_after_lock_acquisition
-test_secondary_session_cannot_mutate_primary_branch_state
-test_rebind_recollects_undelivered_mirror
 test_branch_mirror_filters_order_and_cursor
 test_branch_session_persists_across_process_restarts
+test_cold_start_activates_after_lock_acquisition
+test_secondary_session_stays_inert
+test_rebind_remirrors_undelivered_dialog_from_durable_cursor

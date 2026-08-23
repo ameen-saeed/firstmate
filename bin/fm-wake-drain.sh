@@ -282,25 +282,6 @@ fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
 DRAIN_LOCK_HELD=true
 
 if [ -n "$ACK_THROUGH" ]; then
-  PRESENTED_SEQUENCES=0
-  if [ "${FM_SUPERVISION_ACTOR:-}" = branch ] && [ "$ACK_THROUGH" -gt 0 ]; then
-    PRESENTED_SEQUENCES=$(awk -F '\t' -v cutoff="$ACK_THROUGH" '
-      NF >= 5 && $2 ~ /^[0-9]+$/ && $2 <= cutoff {
-        dedupe = $3 SUBSEP $4
-        if ($3 == "heartbeat") dedupe = "heartbeat"
-        if (!(dedupe in seen)) order[++count] = dedupe
-        seen[dedupe] = 1
-        seq[dedupe] = $2
-      }
-      END { for (i = 1; i <= count; i++) print seq[order[i]] }
-    ' "$FM_WAKE_QUEUE") || exit 1
-    for PRESENTED_SEQUENCE in $PRESENTED_SEQUENCES; do
-      if ! grep -E '^\{"seq":[0-9]+,"wake_seq":'"$PRESENTED_SEQUENCE"',' "$STATE/branch-outcomes.jsonl" >/dev/null 2>&1; then
-        echo "wake drain: branch acknowledgement refused - wake sequence $PRESENTED_SEQUENCE has no durable outcome" >&2
-        exit 1
-      fi
-    done
-  fi
   ACK_FINGERPRINTS=$(inactive_outcome_fingerprints "$ACK_THROUGH" 'inactive-outcome:') || exit 1
   ACK_NOTICE_FINGERPRINTS=$(inactive_outcome_fingerprints "$ACK_THROUGH" 'inactive-reconcile:') || exit 1
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
@@ -346,13 +327,6 @@ if [ -n "$ACK_THROUGH" ]; then
   DRAIN_TMP=
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   DRAIN_LOCK_HELD=false
-  if [ "${FM_SUPERVISION_ACTOR:-}" = branch ]; then
-    ACK_RECEIPT_DIR="$STATE/branch-ack-receipts"
-    mkdir -p "$ACK_RECEIPT_DIR" || exit 1
-    ACK_RECEIPT_TMP=$(mktemp "$ACK_RECEIPT_DIR/.receipt.XXXXXX") || exit 1
-    printf '%s\n' "$PRESENTED_SEQUENCES" > "$ACK_RECEIPT_TMP" || exit 1
-    mv "$ACK_RECEIPT_TMP" "$ACK_RECEIPT_DIR/${ACK_RECEIPT_TMP##*/.}" || exit 1
-  fi
   if [ "$RECOVERY_ACK_MOVED" = true ]; then
     printf 'wake drain: acknowledged wakes through %s, but a newer recovery episode is pending; re-run bin/fm-wake-drain.sh and use the new WAKE_ACK_REQUIRED command\n' \
       "$ACK_THROUGH" >&2

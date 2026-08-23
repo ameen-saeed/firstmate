@@ -19,20 +19,29 @@
 // before_provider_request hook - main keeps Pi's default per-session key.
 // Wakes, mirrored dialog, and merge notes are all appends at a tail.
 //
+// Session-lock ownership: every acting boundary (wake acceptance, mirror
+// collection, marker writes, lease cleanup) re-evaluates lock ownership
+// LAZILY, the same way the watcher extension evaluates it at arm time. A cold
+// Pi start acquires the lock only when the session runs fm-session-start.sh,
+// so latching ownership once at session_start would leave the branch inert
+// for the whole process; and a secondary read-only Pi session that never owns
+// the lock must never write markers, clean leases, or accept wakes.
+//
 // Failure direction: every path that cannot reach a working branch falls back
 // to delivering the wake to MAIN exactly as before the branch existed - a
-// broken branch degrades to today's behavior, never to a lost wake.
+// broken branch degrades to today's behavior, never to a lost wake. The wake
+// queue itself stays durable until the handler runs the drain's
+// acknowledgement, so a branch that dies mid-handling re-presents its rows at
+// the next drain exactly as a mid-handling main crash always has.
+//
+// Threat model (captain-decided): the branch's actor identity is
+// CONFUSED-AGENT-GRADE - deterministic spawnHook env injection plus a
+// readonly-variable shell prelude so an accidental override fails loudly
+// inside the branch's own shell. bin/fm-lease-lib.sh documents the grade and
+// its deliberate limits.
 import { spawnSync } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
-import {
-  existsSync,
-  mkdirSync,
-  readdirSync,
-  readFileSync,
-  renameSync,
-  unlinkSync,
-  writeFileSync,
-} from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -69,9 +78,6 @@ const promptScript = join(fmRoot, "bin", "fm-branch-prompt.sh");
 const outcomeScript = join(fmRoot, "bin", "fm-branch-outcome.sh");
 const leaseScript = join(fmRoot, "bin", "fm-lease.sh");
 const loadedMarker = join(state, ".pi-branch-extension-loaded");
-const branchGenerationFile = join(state, ".pi-branch-generation");
-const pendingWakesDir = join(state, "branch-pending-wakes");
-const ackReceiptsDir = join(state, "branch-ack-receipts");
 
 // Same tool set in the same order on every request (part of the cached
 // prefix). "bash" resolves to the customTools override below, which injects
@@ -128,6 +134,9 @@ function pidAlive(pid: string): boolean {
   }
 }
 
+// Same ownership read as the watcher extension's lockOwnership(): the lock
+// names the harness pid, and this process owns it when that pid appears in
+// its own ancestry.
 function lockOwnership(): LockOwnership {
   let lockPid = "";
   try {
@@ -196,21 +205,20 @@ type ReadonlyEntries = {
   getEntries(): Array<{ type: string }>;
 };
 
-// Collect main's not-yet-mirrored captain/assistant dialog from its session
-// entries (durable, so a restart replays from the same source). The in-memory
-// anchor stops the next turn_end from re-collecting the same entries, while
-// the DURABLE cursor advances only after the batch was actually delivered
-// into the branch (flushMirror), so a crash between collect and delivery
-// re-mirrors rather than drops - over-mirroring is idempotent context.
+// Volatile mirror-collection state. Instance-scoped and cleared at the
+// session replacement boundary, so a replacement extension instance
+// reconstructs EXCLUSIVELY from the durable cursor: dialog collected but not
+// yet delivered re-mirrors rather than dropping (the durable cursor advances
+// only in flushMirror after delivery).
 type MirrorCollectionState = {
   collectAnchor: MirrorCursor | null;
   pendingCursor: MirrorCursor | null;
 };
 
-function collectMainDialog(sessionManager: ReadonlyEntries, state: MirrorCollectionState): MirrorItem[] {
+function collectMainDialog(sessionManager: ReadonlyEntries, collection: MirrorCollectionState): MirrorItem[] {
   const file = sessionManager.getSessionFile() ?? "";
   const entries = sessionManager.getEntries();
-  const anchor = state.collectAnchor ?? readMirrorCursor();
+  const anchor = collection.collectAnchor ?? readMirrorCursor();
   const start = anchor.file === file ? Math.min(anchor.index, entries.length) : 0;
   const items: MirrorItem[] = [];
   for (const entry of entries.slice(start)) {
@@ -223,8 +231,8 @@ function collectMainDialog(sessionManager: ReadonlyEntries, state: MirrorCollect
     if (message.role === "user" && isOperationalUserText(text)) continue;
     items.push({ tag: message.role === "user" ? "captain" : "main", text: capMirrorText(text) });
   }
-  state.collectAnchor = { file, index: entries.length };
-  state.pendingCursor = state.collectAnchor;
+  collection.collectAnchor = { file, index: entries.length };
+  collection.pendingCursor = collection.collectAnchor;
   return items;
 }
 
@@ -233,14 +241,12 @@ export default function (pi: ExtensionAPI) {
   let branchBroken = "";
   let mainStreaming = false;
   let shuttingDown = false;
-  let ownershipActivated = false;
-  let generationToken = randomUUID();
-  let pendingWakeCounter = 0;
-  let activeWake: { reportedWakeSequences: Set<number>; mergedWakeSequences: Set<number> } | null = null;
-  let activeBranchTools = 0;
-  let branchToolWaiters: Array<() => void> = [];
-  const mergedOutcomeSequences = new Set<number>();
-  const receiptedOutcomeSequences = new Set<number>();
+  // Bumps at every session replacement so a stale chain continuation from the
+  // prior generation cannot act into the new one.
+  let generation = 0;
+  // One-time per-generation activation work (marker write + stray branch
+  // lease cleanup); ownership itself is re-read lazily at every boundary.
+  let activatedGeneration = -1;
   // Serializes branch work: mirror appends and wake turns run strictly in
   // dispatch order, one at a time (the branch runs drain -> handle -> ack
   // serially by design).
@@ -248,49 +254,42 @@ export default function (pi: ExtensionAPI) {
   const pendingMirror: MirrorItem[] = [];
   const mirrorCollection: MirrorCollectionState = { collectAnchor: null, pendingCursor: null };
 
-  function markLoaded(): boolean {
-    if (lockOwnership() !== "owned") return false;
+  function markLoaded(): void {
     try {
-      const lockPid = readFileSync(`${state}/.lock`, "utf8").trim();
       mkdirSync(state, { recursive: true });
-      process.env.FM_PI_BRANCH_GENERATION = generationToken;
-      writeFileSync(loadedMarker, `${process.pid}\n${lockPid}\n${generationToken}\n`);
-      writeFileSync(branchGenerationFile, `${generationToken}\n`);
-      return true;
+      writeFileSync(loadedMarker, `${process.pid}\n`);
     } catch {
-      return false;
+      // Diagnostic marker only; never block activation on it.
     }
   }
 
-  function beginBranchTool(): void {
-    activeBranchTools += 1;
-  }
-
-  function endBranchTool(): void {
-    activeBranchTools -= 1;
-    if (activeBranchTools !== 0) return;
-    const waiters = branchToolWaiters;
-    branchToolWaiters = [];
-    for (const resolveWaiter of waiters) resolveWaiter();
-  }
-
-  function waitForBranchTools(): Promise<void> {
-    if (activeBranchTools === 0) return Promise.resolve();
-    return new Promise((resolveWaiter) => branchToolWaiters.push(resolveWaiter));
-  }
-
-  function releaseBranchLeases(): boolean {
-    if (lockOwnership() !== "owned") return false;
+  // A replaced branch conversation must not leave its per-task leases behind
+  // (the holder pid - this process - is still alive, so the sweep alone would
+  // keep them). One bulk release per generation, at activation.
+  function releaseBranchLeases(): void {
     try {
-      const result = spawnSync("bash", [leaseScript, "release-actor", "--actor", "branch"], {
+      spawnSync("bash", [leaseScript, "release-actor", "--actor", "branch"], {
         cwd: fmRoot,
         encoding: "utf8",
         env: { ...scriptEnv, FM_SUPERVISION_ACTOR: "branch" },
       });
-      return result.status === 0;
     } catch {
-      return false;
+      // Lease staleness and the loud guard refusals remain the backstop.
     }
+  }
+
+  // Lazy, per-action ownership evaluation (see the header). Returns true only
+  // when this session owns the fleet lock right now; the first true evaluation
+  // of a generation also writes the diagnostic marker and clears stray branch
+  // leases from a prior generation.
+  function actingAsOwner(): boolean {
+    if (shuttingDown || lockOwnership() !== "owned") return false;
+    if (activatedGeneration !== generation) {
+      activatedGeneration = generation;
+      markLoaded();
+      releaseBranchLeases();
+    }
+    return true;
   }
 
   function runOutcomeScript(args: string[]): { ok: boolean; stdout: string; detail: string } {
@@ -315,15 +314,13 @@ export default function (pi: ExtensionAPI) {
   // runs; the note is a cache of it at main's tail. Delivery modes per the
   // design: routine+idle appends now with no turn, routine+busy appends after
   // the captain's next prompt, captain-relevant appends and triggers exactly
-  // one turn (queued as a follow-up while main is busy).
+  // one turn (queued as a follow-up while main is busy). The read cursor
+  // advances once the note is handed to Pi; a crash inside Pi's own delivery
+  // window leaves the outcome durable in the store, where main's
+  // fm_branch_outcomes tool still reads it on demand.
   function mergeIntoMain(seq: string, task: string, verdict: Verdict, summary: string): void {
     const note = `⎇ branch merged [${verdict}] ${task}: ${summary}`;
-    const message = {
-      customType: "fm-branch-merge",
-      content: note,
-      display: true,
-      details: { outcomeSeq: Number(seq) },
-    };
+    const message = { customType: "fm-branch-merge", content: note, display: true };
     if (verdict === "captain") {
       pi.sendMessage(message, { triggerTurn: true, deliverAs: "followUp" });
     } else if (mainStreaming) {
@@ -331,25 +328,8 @@ export default function (pi: ExtensionAPI) {
     } else {
       pi.sendMessage(message, {});
     }
-  }
-
-  function markDeliveredOutcomes(sessionManager: ReadonlyEntries): void {
-    const delivered = new Set<number>();
-    for (const entry of sessionManager.getEntries()) {
-      if (entry.type !== "message") continue;
-      const message = (
-        entry as {
-          message?: { role?: string; customType?: string; details?: { outcomeSeq?: unknown } };
-        }
-      ).message;
-      if (message?.role !== "custom" || message.customType !== "fm-branch-merge") continue;
-      const seq = message.details?.outcomeSeq;
-      if (typeof seq === "number" && Number.isInteger(seq) && seq > 0) delivered.add(seq);
-    }
-    for (const seq of [...delivered].sort((a, b) => a - b)) {
-      if (receiptedOutcomeSequences.has(seq)) continue;
-      const marked = runOutcomeScript(["mark-delivered", "--seq", String(seq)]);
-      if (marked.ok) receiptedOutcomeSequences.add(seq);
+    if (/^[0-9]+$/.test(seq)) {
+      runOutcomeScript(["mark-read", "--through", seq]);
     }
   }
 
@@ -368,20 +348,12 @@ export default function (pi: ExtensionAPI) {
           "One or two sentences in captain outcome language; include the full https:// PR URL when a PR is involved",
       }),
       wake: Type.Optional(Type.String({ description: "The wake reason line this outcome answers" })),
-      wakeSequence: Type.Optional(
-        Type.Number({ description: "The drained wake row sequence, or 0 when the drain presented no queue row" }),
-      ),
     }),
     execute: async (_toolCallId, params) => {
       const task = String((params as { task: unknown }).task || "").trim();
       const verdictRaw = String((params as { verdict: unknown }).verdict || "");
       const summary = String((params as { summary: unknown }).summary || "").trim();
       const wake = String((params as { wake?: unknown }).wake ?? "").trim();
-      const wakeSequenceRaw = (params as { wakeSequence?: unknown }).wakeSequence;
-      const wakeSequence =
-        typeof wakeSequenceRaw === "number" && Number.isInteger(wakeSequenceRaw) && wakeSequenceRaw >= 0
-          ? wakeSequenceRaw
-          : null;
       if (!task || !summary || (verdictRaw !== "routine" && verdictRaw !== "captain")) {
         return {
           content: [{ type: "text", text: "invalid report: task, verdict (routine|captain), and summary are required" }],
@@ -389,82 +361,22 @@ export default function (pi: ExtensionAPI) {
           isError: true,
         };
       }
-      if (activeWake && wakeSequence === null) {
+      const verdict = verdictRaw as Verdict;
+      const appendArgs = ["append", "--task", task, "--verdict", verdict, "--summary", summary];
+      if (wake) appendArgs.push("--wake", wake);
+      const appended = runOutcomeScript(appendArgs);
+      if (!appended.ok) {
         return {
-          content: [{ type: "text", text: "invalid report: wakeSequence is required for an active supervision wake" }],
+          content: [{ type: "text", text: `outcome store append failed (nothing merged): ${appended.detail}` }],
           details: undefined,
           isError: true,
         };
       }
-      const wakeState = activeWake;
-      if (wakeState && wakeSequence !== null) {
-        if (wakeState.reportedWakeSequences.has(wakeSequence)) {
-          return {
-            content: [{ type: "text", text: `duplicate report: wakeSequence ${wakeSequence} was already recorded` }],
-            details: undefined,
-            isError: true,
-          };
-        }
-        wakeState.reportedWakeSequences.add(wakeSequence);
-      }
-      const verdict = verdictRaw as Verdict;
-      const appendArgs = ["append", "--task", task, "--verdict", verdict, "--summary", summary, "--result-record"];
-      if (wake) appendArgs.push("--wake", wake);
-      if (wakeSequence !== null) appendArgs.push("--wake-seq", String(wakeSequence));
-      beginBranchTool();
-      const appended = runOutcomeScript(appendArgs);
-      try {
-        if (!appended.ok) {
-          if (wakeState && wakeSequence !== null) wakeState.reportedWakeSequences.delete(wakeSequence);
-          return {
-            content: [{ type: "text", text: `outcome store append failed (nothing merged): ${appended.detail}` }],
-            details: undefined,
-            isError: true,
-          };
-        }
-        const separator = appended.stdout.indexOf("\t");
-        const status = separator > 0 ? appended.stdout.slice(0, separator) : "";
-        let stored: { seq?: unknown; task?: unknown; verdict?: unknown; summary?: unknown };
-        try {
-          stored = JSON.parse(separator > 0 ? appended.stdout.slice(separator + 1) : "") as typeof stored;
-        } catch {
-          if (wakeState && wakeSequence !== null) wakeState.reportedWakeSequences.delete(wakeSequence);
-          return {
-            content: [{ type: "text", text: "outcome store returned an invalid append result" }],
-            details: undefined,
-            isError: true,
-          };
-        }
-        const storedSeq = typeof stored.seq === "number" && Number.isInteger(stored.seq) ? stored.seq : 0;
-        const storedTask = typeof stored.task === "string" ? stored.task : "";
-        const storedVerdict = stored.verdict === "routine" || stored.verdict === "captain" ? stored.verdict : null;
-        const storedSummary = typeof stored.summary === "string" ? stored.summary : "";
-        if (
-          !storedSeq ||
-          !storedTask ||
-          !storedVerdict ||
-          !storedSummary ||
-          !["new", "existing-unread", "existing-delivered"].includes(status)
-        ) {
-          if (wakeState && wakeSequence !== null) wakeState.reportedWakeSequences.delete(wakeSequence);
-          return {
-            content: [{ type: "text", text: "outcome store returned an invalid append result" }],
-            details: undefined,
-            isError: true,
-          };
-        }
-        if (status !== "existing-delivered" && !mergedOutcomeSequences.has(storedSeq)) {
-          mergeIntoMain(String(storedSeq), storedTask, storedVerdict, storedSummary);
-          mergedOutcomeSequences.add(storedSeq);
-        }
-        if (wakeState && wakeSequence !== null) wakeState.mergedWakeSequences.add(wakeSequence);
-        return {
-          content: [{ type: "text", text: `recorded seq ${storedSeq} and merged [${storedVerdict}] into main` }],
-          details: undefined,
-        };
-      } finally {
-        endBranchTool();
-      }
+      mergeIntoMain(appended.stdout, task, verdict, summary);
+      return {
+        content: [{ type: "text", text: `recorded seq ${appended.stdout} and merged [${verdict}] into main` }],
+        details: undefined,
+      };
     },
   };
 
@@ -527,12 +439,12 @@ export default function (pi: ExtensionAPI) {
     const bashTool = createBashToolDefinition(fmRoot, {
       spawnHook: (context) => ({
         ...context,
-        // Keep the actor fence immutable in a retained wrapper shell. Lease
-        // guards recognize the live wrapper in the process ancestry, so a
-        // nested shell cannot discard branch provenance with env -u or by
-        // deleting a writable state marker.
-        command: `: "fm-branch-shell:${generationToken}"
-readonly FM_SUPERVISION_ACTOR FM_LEASE_HOLDER_PID FM_LEASE_GENERATION FM_PI_BRANCH_GENERATION
+        // Loud accidental-override guard (captain-decided): the actor
+        // variables are readonly inside the branch's own shell, so an
+        // accidental in-shell reassignment fails loudly instead of silently
+        // impersonating main. Confused-agent-grade by design; the threat
+        // model lives in bin/fm-lease-lib.sh.
+        command: `readonly FM_SUPERVISION_ACTOR FM_LEASE_HOLDER_PID
 (
 ${context.command}
 )`,
@@ -541,20 +453,9 @@ ${context.command}
           ...scriptEnv,
           FM_SUPERVISION_ACTOR: "branch",
           FM_LEASE_HOLDER_PID: String(process.pid),
-          FM_LEASE_GENERATION: generationToken,
-          FM_PI_BRANCH_GENERATION: generationToken,
         },
       }),
     });
-    const executeBash = bashTool.execute.bind(bashTool);
-    bashTool.execute = async (...args) => {
-      beginBranchTool();
-      try {
-        return await executeBash(...args);
-      } finally {
-        endBranchTool();
-      }
-    };
     const created = await createAgentSession({
       cwd: fmRoot,
       sessionManager,
@@ -612,140 +513,23 @@ ${context.command}
     await pi.sendUserMessage(content, { deliverAs: "followUp" });
   }
 
-  function persistAcceptedWake(message: string): string {
-    mkdirSync(pendingWakesDir, { recursive: true });
-    const id = `${process.pid}-${Date.now()}-${++pendingWakeCounter}`;
-    const finalPath = join(pendingWakesDir, `${id}.json`);
-    const temporaryPath = join(pendingWakesDir, `.${id}.tmp`);
-    writeFileSync(temporaryPath, `${JSON.stringify({ message })}\n`, { flag: "wx" });
-    renameSync(temporaryPath, finalPath);
-    return finalPath;
-  }
-
-  function clearAcceptedWake(path: string): void {
-    try {
-      unlinkSync(path);
-    } catch {}
-  }
-
-  function clearAckReceipts(): void {
-    let names: string[];
-    try {
-      names = readdirSync(ackReceiptsDir);
-    } catch {
-      return;
-    }
-    for (const name of names) {
-      try {
-        unlinkSync(join(ackReceiptsDir, name));
-      } catch {}
-    }
-  }
-
-  function consumeMatchingAckReceipt(mergedWakeSequences: Set<number>): boolean {
-    let names: string[];
-    try {
-      names = readdirSync(ackReceiptsDir);
-    } catch {
-      return false;
-    }
-    let matched = false;
-    for (const name of names) {
-      const path = join(ackReceiptsDir, name);
-      try {
-        const sequences = readFileSync(path, "utf8")
-          .split(/\s+/)
-          .filter(Boolean)
-          .map(Number);
-        const receiptSequences = new Set(sequences);
-        if (
-          sequences.length > 0 &&
-          receiptSequences.size === mergedWakeSequences.size &&
-          sequences.every((sequence) => Number.isInteger(sequence) && mergedWakeSequences.has(sequence))
-        ) {
-          matched = true;
-        }
-        unlinkSync(path);
-      } catch {}
-    }
-    return matched;
-  }
-
-  function replayAcceptedWakes(): void {
-    if (lockOwnership() !== "owned") return;
-    let names: string[];
-    try {
-      names = readdirSync(pendingWakesDir).filter((name) => name.endsWith(".json")).sort();
-    } catch {
-      return;
-    }
-    branchChain = branchChain.then(async () => {
-      for (const name of names) {
-        const path = join(pendingWakesDir, name);
-        try {
-          const parsed = JSON.parse(readFileSync(path, "utf8")) as { message?: unknown };
-          if (typeof parsed.message !== "string") continue;
-          await fallbackToMain(parsed.message, "accepted wake recovered after supervision session shutdown");
-          clearAcceptedWake(path);
-        } catch {}
-      }
-    });
-  }
-
-  function activateOwnership(): boolean {
-    if (shuttingDown || lockOwnership() !== "owned") return false;
-    if (ownershipActivated) return markLoaded();
-    if (!markLoaded()) return false;
-    const leasesReleased = releaseBranchLeases();
-    replayAcceptedWakes();
-    ownershipActivated = leasesReleased;
-    return ownershipActivated;
-  }
-
-  function enqueueWake(message: string, pendingPath: string, acceptedGeneration: string): void {
+  function enqueueWake(message: string, acceptedGeneration: number): void {
     branchChain = branchChain
       .then(async () => {
-        if (
-          shuttingDown ||
-          acceptedGeneration !== generationToken ||
-          !ownershipActivated ||
-          lockOwnership() !== "owned"
-        ) {
-          throw new Error("supervision session shut down before handling the accepted wake");
+        if (shuttingDown || acceptedGeneration !== generation) {
+          throw new Error("supervision session was replaced before handling the accepted wake");
         }
         const session = await ensureBranch();
         await flushMirror(session);
-        const wakeState = {
-          reportedWakeSequences: new Set<number>(),
-          mergedWakeSequences: new Set<number>(),
-        };
-        clearAckReceipts();
-        activeWake = wakeState;
-        try {
-          await session.prompt(
-            `FIRSTMATE SUPERVISION WAKE: ${message}\n\nHandle this per your operating procedure and finish with fm_branch_report.`,
-          );
-          if (wakeState.mergedWakeSequences.size === 0) {
-            throw new Error("supervision branch completed without a durable outcome report");
-          }
-          if (!consumeMatchingAckReceipt(wakeState.mergedWakeSequences)) {
-            throw new Error("supervision branch completed without acknowledging its reported wake batch");
-          }
-          clearAcceptedWake(pendingPath);
-        } finally {
-          if (activeWake === wakeState) activeWake = null;
-        }
+        await session.prompt(
+          `FIRSTMATE SUPERVISION WAKE: ${message}\n\nHandle this per your operating procedure and finish with fm_branch_report.`,
+        );
       })
       .catch(async (error: unknown) => {
-        if (
-          shuttingDown ||
-          acceptedGeneration !== generationToken ||
-          !ownershipActivated ||
-          lockOwnership() !== "owned"
-        ) return;
+        // Return the wake to main rather than losing it; the durable wake
+        // queue additionally re-presents anything never acknowledged.
         try {
           await fallbackToMain(message, error instanceof Error ? error.message : String(error));
-          clearAcceptedWake(pendingPath);
         } catch {}
       });
   }
@@ -754,7 +538,7 @@ ${context.command}
     if (!branch || pendingMirror.length === 0) return;
     branchChain = branchChain
       .then(async () => {
-        if (shuttingDown || !branch || !ownershipActivated || lockOwnership() !== "owned") return;
+        if (shuttingDown || !branch) return;
         await flushMirror(branch);
       })
       .catch(() => {
@@ -766,19 +550,12 @@ ${context.command}
   pi.events?.on?.(FM_BRANCH_DISPATCH_EVENT, (data) => {
     const offer = data as BranchDispatchOffer;
     if (!offer || typeof offer.accept !== "function") return;
-    if (!activateOwnership()) return;
+    if (!actingAsOwner()) return; // cold start pre-lock, secondary session, or shutdown
     if (!branchEnabled()) return;
     if (afkActive()) return; // the away daemon owns supervision while afk
     if (branchBroken) return; // fail back to today's wake-to-main path
-    let pendingPath: string;
-    try {
-      pendingPath = persistAcceptedWake(offer.message);
-    } catch {
-      return;
-    }
-    const acceptedGeneration = generationToken;
     offer.accept();
-    enqueueWake(offer.message, pendingPath, acceptedGeneration);
+    enqueueWake(offer.message, generation);
   });
 
   pi.on?.("agent_start", () => {
@@ -796,9 +573,8 @@ ${context.command}
   // lands before any later wake. The durable cursor advances only in
   // flushMirror after the complete pending batch reaches the branch.
   pi.on?.("turn_end", (_event, ctx) => {
-    if (!activateOwnership() || !branchEnabled()) return;
+    if (!actingAsOwner() || !branchEnabled()) return;
     try {
-      markDeliveredOutcomes(ctx.sessionManager);
       pendingMirror.push(...collectMainDialog(ctx.sessionManager, mirrorCollection));
     } catch {
       return;
@@ -808,28 +584,23 @@ ${context.command}
 
   // Pi emits session_shutdown for ordinary same-process replacements (/new,
   // /resume, /fork, reload) as well as terminal quit, exactly as the watcher
-  // extension documents. Shutdown quiesces this generation and releases the
-  // branch session; a replacement session_start re-arms, and the next wake
-  // reopens the persistent branch from its recorded pointer. Terminal quit
-  // simply never fires another session_start.
-  pi.on?.("session_start", (_event, ctx) => {
+  // extension documents. Shutdown quiesces this generation, clears the
+  // volatile mirror state so the replacement reconstructs from the durable
+  // cursor, and releases the branch session; a replacement session_start
+  // re-arms, and the next wake reopens the persistent branch from its
+  // recorded pointer. Terminal quit simply never fires another session_start.
+  pi.on?.("session_start", () => {
     shuttingDown = false;
     branchBroken = "";
-    ownershipActivated = false;
-    generationToken = randomUUID();
-    if (!activateOwnership()) return;
-    markDeliveredOutcomes(ctx.sessionManager);
+    generation += 1;
   });
 
-  pi.on?.("session_shutdown", async (_event, ctx) => {
+  pi.on?.("session_shutdown", () => {
     shuttingDown = true;
+    generation += 1;
     pendingMirror.length = 0;
     mirrorCollection.collectAnchor = null;
     mirrorCollection.pendingCursor = null;
-    const stillOwnsLock = lockOwnership() === "owned";
-    if (stillOwnsLock) markDeliveredOutcomes(ctx.sessionManager);
-    generationToken = randomUUID();
-    if (stillOwnsLock) markLoaded();
     if (branch) {
       try {
         branch.dispose();
@@ -838,9 +609,6 @@ ${context.command}
       }
       branch = null;
     }
-    await waitForBranchTools();
-    if (stillOwnsLock) releaseBranchLeases();
-    ownershipActivated = false;
   });
 
   pi.registerTool?.({
@@ -873,6 +641,4 @@ ${context.command}
   pi.registerMessageRenderer?.("fm-branch-merge", (message, _options, theme) => {
     return new Text(theme.fg("customMessageText", textOfContent(message.content)), 0, 0);
   });
-
-  markLoaded();
 }

@@ -899,10 +899,12 @@ fi
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_CONTROL_LOCK="$STATE/.control-$ID.lock"
   control_owner=$(cat "$SPAWN_CONTROL_LOCK/pid" 2>/dev/null || true)
-  supervision_actor=$(fm_lease_actor) || exit "$FM_LEASE_REFUSE_EXIT"
   if [ "$control_owner" = "$PPID" ] && fm_pid_alive "$control_owner"; then
     SPAWN_CONTROL_PARENT=1
-  elif [ "$supervision_actor" = branch ]; then
+  elif [ "$(fm_lease_actor)" = branch ]; then
+    # Role partition refinement: branch recovery relaunches only through the
+    # fm-control transaction that owns the control lock, never by invoking
+    # this entrypoint directly (contract: bin/fm-lease-lib.sh).
     echo "error: relaunch (fm-spawn) refused - the supervision branch must relaunch through fm-control" >&2
     exit "$FM_LEASE_REFUSE_EXIT"
   elif fm_lock_try_acquire "$SPAWN_CONTROL_LOCK"; then
@@ -910,10 +912,6 @@ if [ "$RELAUNCH" -eq 1 ]; then
   else
     echo "error: another lifecycle action is already running for task $ID" >&2
     exit 1
-  fi
-  if [ "$supervision_actor" = branch ] && [ -z "${FM_CONTROL_RELAUNCH_TX:-}" ]; then
-    echo "error: relaunch (fm-spawn) refused - the branch control parent did not provide a relaunch transaction" >&2
-    exit "$FM_LEASE_REFUSE_EXIT"
   fi
 fi
 if [ "$RELAUNCH" -eq 0 ]; then

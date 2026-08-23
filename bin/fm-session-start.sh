@@ -322,7 +322,6 @@ if [ -z "${FM_SESSION_START_STAGE_FILE:-}" ]; then
 fi
 
 PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
-BRANCH_REPLAY_LAST=
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
@@ -715,14 +714,15 @@ else
     printf 'inactive outcome reconciliation: %s\n' "$INACTIVE_OUT"
   fi
   # Pi supervision-branch recovery, locked path only: clear leases whose
-  # supervising process died, and surface outcomes the branch stored durably
-  # that never reached main (docs/pi-supervision-branch.md).
+  # supervising session died, and surface outcomes the branch stored durably
+  # that never reached main (docs/pi-supervision-branch.md). Gated to the
+  # pi/pi-signed primary so a non-Pi home runs neither step - homes on any
+  # other harness stay entirely untouched (captain-decided criterion).
   if [ "$PRIMARY_HARNESS" = pi ] || [ "$PRIMARY_HARNESS" = pi-signed ]; then
     FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-lease.sh" sweep 2>/dev/null || true
     BRANCH_REPLAY_OUT=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
       "$SCRIPT_DIR/fm-branch-outcome.sh" startup-replay 2>&1) || BRANCH_REPLAY_OUT=
     if [ -n "$BRANCH_REPLAY_OUT" ]; then
-      BRANCH_REPLAY_LAST=$(printf '%s\n' "$BRANCH_REPLAY_OUT" | sed -n 's/^{"seq":\([0-9][0-9]*\),.*/\1/p' | tail -n 1)
       printf '%s\n' "$BRANCH_REPLAY_OUT"
     fi
   fi
@@ -956,10 +956,6 @@ if [ "$READ_ONLY" -eq 0 ] && [ "$REEMIT" -eq 0 ]; then
       printf '\nSESSION_START_AGENTS_BASELINE: not recorded - a later supported rebuild will re-emit AGENTS.md.\n'
     fi
   fi
-fi
-
-if [ -n "$BRANCH_REPLAY_LAST" ] && [ "${FM_SESSIONSTART_REPLAY_METADATA_FD:-}" = 3 ]; then
-  printf '%s\n' "$BRANCH_REPLAY_LAST" >&3
 fi
 
 exit 0

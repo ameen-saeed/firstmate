@@ -18,8 +18,8 @@ This feature is Pi-only by construction and changes nothing anywhere else:
   Every path that cannot reach a working branch falls back to delivering the wake to main - a broken branch degrades to today's behavior, never to a lost wake.
 - Branch system prompt: `bin/fm-branch-prompt.sh`; its header owns the byte-stable-prefix contract (no timestamps, no fleet snapshot, no per-wake content).
 - Outcome store: `bin/fm-branch-outcome.sh`; its header owns the append-only format and the read cursor.
-  Outcomes are written to the store before any note reaches main, and an unread outcome remains eligible for locked session-start replay until a merge receipt or a successfully appended replay durably confirms main delivery.
-- Consistency: `bin/fm-lease-lib.sh` owns the per-task lease contract and the main-only role partition; `bin/fm-lease.sh` is the command surface.
+  Outcomes are written to the store before any note reaches main, and unread outcomes replay once at the next locked session start.
+- Consistency: `bin/fm-lease-lib.sh` owns the per-task lease contract, the main-only role partition, and the deliberate CONFUSED-AGENT-GRADE threat model these guards target (captain-decided; adversarial-grade separation is out of scope and tracked as follow-up design work); `bin/fm-lease.sh` is the command surface.
   The guards are wired into `fm-send.sh`, `fm-control.sh`, and `fm-teardown.sh` (overlap, lease-checked) and `fm-pr-merge.sh`, `fm-merge-local.sh`, and `fm-spawn.sh` (main-owned, branch refused; a relaunch through `fm-control` stays branch-legal recovery).
 - Operator toggle: `config/pi-supervision-branch` (docs/configuration.md "Pi supervision branch").
 

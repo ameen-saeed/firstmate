@@ -4,8 +4,8 @@
 # The lease contract itself (file format, actors, staleness, guard semantics)
 # is owned by bin/fm-lease-lib.sh; this is the command surface the two
 # supervision actors use around the overlap set (steering, stopping, cleanup,
-# backlog status, stuck-worker recovery). bin/fm-lease-lib.sh also owns the
-# exact scope of the reserved "backlog" resource.
+# backlog status, stuck-worker recovery). "backlog" is the reserved resource
+# id for the whole-file guard around data/backlog.md writes.
 #
 # Usage:
 #   fm-lease.sh claim <task> [--actor main|branch]
@@ -14,17 +14,17 @@
 #       actor holds a live lease. A stale lease (dead pid, or a torn record)
 #       is cleared and re-claimed.
 #   fm-lease.sh release <task> [--actor main|branch]
-#       Drop the calling actor's lease. Releasing a lease the actor does not
+#       Drop the named actor's lease. Releasing a lease the actor does not
 #       hold is a silent no-op, so a retry after a partial failure is safe.
-#       The requested actor must match $FM_SUPERVISION_ACTOR (else main), and
-#       the recorded holder pid must be an ancestor of this command, so actor
-#       environment spoofing cannot clear a sibling actor's live fence.
+#       Passing the OTHER actor's name is the explicit wedged-lease override
+#       the guard's refusal message points at; it prints what it removed.
 #   fm-lease.sh check <task>
 #       Print "<actor> <pid> <epoch> <live|stale>" for a held lease, or
 #       nothing (exit 1) when the task is unleased.
 #   fm-lease.sh release-actor --actor main|branch
-#       Drop every lease held by the calling actor during generation cleanup;
-#       actor and holder-ancestry authorization are the same as release.
+#       Drop every lease the named actor holds; the Pi branch extension runs
+#       this at generation activation so a replaced branch conversation's
+#       leases never outlive it.
 #   fm-lease.sh sweep
 #       Remove every provably stale lease in this home. Run at session start
 #       (a lease held by a dead actor is cleared at session start); safe to
@@ -40,13 +40,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-lease-lib.sh
 . "$SCRIPT_DIR/fm-lease-lib.sh"
-# shellcheck source=bin/fm-wake-lib.sh
-. "$SCRIPT_DIR/fm-wake-lib.sh"
 
 mkdir -p "$STATE"
-LEASE_COMMAND_LOCK="$STATE/.fm-lease-command.lock"
-fm_lock_acquire_wait "$LEASE_COMMAND_LOCK"
-trap 'fm_lock_release "$LEASE_COMMAND_LOCK"' EXIT
 
 usage() {
   echo "usage: fm-lease.sh claim|release <task> [--actor main|branch] | release-actor --actor main|branch | check <task> | sweep" >&2
@@ -102,19 +97,16 @@ esac
 
 case "$CMD" in
   claim)
+    # Loud accidental-override guard: a claim naming the OTHER actor than the
+    # caller's own injected identity is a wiring mistake, never a role change.
+    # (release deliberately allows naming the holder - that is the documented
+    # wedged-lease recovery override, and it prints what it removed.)
     CALLER=$(fm_lease_actor) || exit "$FM_LEASE_REFUSE_EXIT"
     if [ "$ACTOR" != "$CALLER" ]; then
       echo "error: claim refused - the $CALLER supervision actor cannot claim a lease as $ACTOR on '$TASK'" >&2
       exit "$FM_LEASE_REFUSE_EXIT"
     fi
     LEASE=$(fm_lease_path "$TASK")
-    if [ "$ACTOR" = branch ] && [ -n "${FM_LEASE_GENERATION:-}" ]; then
-      ACTIVE_GENERATION=$(cat "$STATE/.pi-branch-generation" 2>/dev/null || true)
-      if [ "$ACTIVE_GENERATION" != "$FM_LEASE_GENERATION" ]; then
-        echo "error: claim refused - the branch session generation is no longer active" >&2
-        exit "$FM_LEASE_REFUSE_EXIT"
-      fi
-    fi
     if fm_lease_live "$TASK" && [ "$FM_LEASE_ACTOR" != "$ACTOR" ]; then
       echo "error: claim refused - task '$TASK' is leased to the $FM_LEASE_ACTOR supervision actor (state/.lease-$TASK)" >&2
       exit "$FM_LEASE_REFUSE_EXIT"
@@ -150,18 +142,13 @@ case "$CMD" in
     fi
     ;;
   release)
-    CALLER=$(fm_lease_actor) || exit "$FM_LEASE_REFUSE_EXIT"
-    if [ "$ACTOR" != "$CALLER" ]; then
-      echo "error: release refused - the $CALLER supervision actor cannot release the $ACTOR actor's lease on '$TASK'" >&2
-      exit "$FM_LEASE_REFUSE_EXIT"
-    fi
     if fm_lease_read "$TASK"; then
-      if [ "$FM_LEASE_ACTOR" = "$ACTOR" ] && ! fm_lease_pid_is_ancestor "$FM_LEASE_PID"; then
-        echo "error: release refused - the $ACTOR actor does not own the process that holds the lease on '$TASK'" >&2
-        exit "$FM_LEASE_REFUSE_EXIT"
-      fi
       if [ "$FM_LEASE_ACTOR" = "$ACTOR" ] || [ -z "$FM_LEASE_ACTOR" ]; then
+        CALLER=$(fm_lease_actor 2>/dev/null || echo main)
         rm -f -- "$(fm_lease_path "$TASK")"
+        if [ -n "$FM_LEASE_ACTOR" ] && [ "$FM_LEASE_ACTOR" != "$CALLER" ]; then
+          echo "released the $FM_LEASE_ACTOR actor's lease on '$TASK' (explicit override)"
+        fi
       fi
     fi
     ;;
@@ -171,17 +158,12 @@ case "$CMD" in
     printf '%s %s %s %s\n' "${FM_LEASE_ACTOR:-unreadable}" "${FM_LEASE_PID:-0}" "${FM_LEASE_EPOCH:-0}" "$LIVENESS"
     ;;
   release-actor)
-    CALLER=$(fm_lease_actor) || exit "$FM_LEASE_REFUSE_EXIT"
-    if [ "$ACTOR" != "$CALLER" ]; then
-      echo "error: release-actor refused - the $CALLER supervision actor cannot release the $ACTOR actor's leases" >&2
-      exit "$FM_LEASE_REFUSE_EXIT"
-    fi
     for LEASE in "$STATE"/.lease-*; do
       [ -e "$LEASE" ] || continue
+      case "$LEASE" in *.lock) continue ;; esac
       TASK=${LEASE##*/.lease-}
       fm_lease_valid_id "$TASK" || continue
-      if fm_lease_read "$TASK" && [ "$FM_LEASE_ACTOR" = "$ACTOR" ] \
-        && fm_lease_pid_is_ancestor "$FM_LEASE_PID"; then
+      if fm_lease_read "$TASK" && [ "$FM_LEASE_ACTOR" = "$ACTOR" ]; then
         rm -f -- "$LEASE"
       fi
     done
