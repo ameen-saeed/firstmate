@@ -98,6 +98,10 @@ export async function createAgentSession(options) {
       (globalThis.__fmPrompts ??= []).push(text);
     },
     async sendCustomMessage(message, opts) {
+      if (globalThis.__fmMirrorGate) {
+        globalThis.__fmMirrorStarted = true;
+        await globalThis.__fmMirrorGate;
+      }
       session.ops.push({ kind: "custom", message, opts });
       (globalThis.__fmMirrors ??= []).push(message);
     },
@@ -395,6 +399,7 @@ test_branch_gating_config_afk_and_fallback() {
   home="$TMP_ROOT/gating-home"
   mkdir -p "$home/state" "$home/config" "$broken/bin"
   install_pi_branch_extension_fixture "$repo"
+  cp "$ROOT/bin/fm-lease.sh" "$ROOT/bin/fm-lease-lib.sh" "$ROOT/bin/fm-wake-lib.sh" "$broken/bin/"
   cat > "$broken/bin/fm-branch-prompt.sh" <<'SH'
 #!/usr/bin/env bash
 echo "synthetic generator failure" >&2
@@ -570,6 +575,48 @@ EOF
   pass "branch session persists across process restarts through the recorded pointer"
 }
 
+test_replacement_activation_cleans_leases_and_retries_failure() {
+  local repo home fakebin out status real_bash
+  repo="$TMP_ROOT/activation-root"
+  home="$TMP_ROOT/activation-home"
+  fakebin="$home/fakebin"
+  real_bash=$(command -v bash)
+  mkdir -p "$home/state" "$home/config" "$fakebin"
+  install_pi_branch_extension_fixture "$repo"
+  cat > "$fakebin/bash" <<'SH'
+#!/bin/sh
+if [ "$1" = "$FM_TEST_LEASE_SCRIPT" ] && [ ! -e "$FM_TEST_FAIL_MARKER" ]; then
+  : > "$FM_TEST_FAIL_MARKER"
+  exit 7
+fi
+exec "$FM_TEST_REAL_BASH" "$@"
+SH
+  chmod +x "$fakebin/bash"
+  out=$(PATH="$fakebin:$PATH" PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_TEST_REAL_BASH="$real_bash" FM_TEST_LEASE_SCRIPT="$ROOT/bin/fm-lease.sh" \
+    FM_TEST_FAIL_MARKER="$home/state/release-failed-once" DRIVER_PRELUDE="$DRIVER_PRELUDE" \
+    node --input-type=module 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, home, realRoot }; })()`);
+const { fire, dispatch, settle, home } = globalThis.__t;
+import { existsSync, writeFileSync } from "node:fs";
+
+writeFileSync(`${home}/state/.lease-task-old`, `branch\t${process.pid}\t123\n`);
+
+fire("session_start", {});
+if (!existsSync(`${home}/state/.lease-task-old`)) throw new Error("failed activation incorrectly committed lease cleanup");
+const offer = dispatch("signal: retry activation");
+if (!offer.accepted) throw new Error("later boundary did not retry failed activation");
+if (existsSync(`${home}/state/.lease-task-old`)) throw new Error("replacement activation did not clean the prior branch lease");
+await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "post-retry wake prompt");
+process.exit(0);
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "replacement activation must clean leases and retry failures: $out"
+  pass "replacement activation cleans old branch leases and retries failed cleanup"
+}
+
 test_cold_start_activates_after_lock_acquisition() {
   local repo home out status
   repo="$TMP_ROOT/coldstart-root"
@@ -642,6 +689,82 @@ EOF
   status=$?
   expect_code 0 "$status" "queued branch actions must recheck lock ownership: $out"
   pass "queued wakes and mirrors stop mutating branch state after lock ownership is lost"
+}
+
+test_stale_generation_boundaries_are_side_effect_free() {
+  local repo home out status
+  repo="$TMP_ROOT/stale-boundaries-root"
+  home="$TMP_ROOT/stale-boundaries-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  out=$(PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, home, sentToMain }; })()`);
+const { fire, dispatch, settle, home, sentToMain } = globalThis.__t;
+import { existsSync, readFileSync } from "node:fs";
+
+if (!dispatch("signal: establish old branch").accepted) throw new Error("old branch wake was not accepted");
+await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "old branch prompt");
+const oldSession = globalThis.__fmSessions[0];
+const oldReport = oldSession.options.customTools.find((tool) => tool.name === "fm_branch_report");
+const oldBash = oldSession.options.customTools.find((tool) => tool.name === "bash");
+
+let releaseMirror;
+globalThis.__fmMirrorGate = new Promise((resolve) => { releaseMirror = resolve; });
+const oldEntries = [{ type: "message", message: { role: "user", content: "old generation mirror" } }];
+fire("turn_end", {}, {
+  sessionManager: { getSessionFile: () => `${home}/old-main.jsonl`, getEntries: () => oldEntries },
+});
+await settle(() => globalThis.__fmMirrorStarted === true, "blocked old mirror delivery");
+fire("session_shutdown", {});
+fire("session_start", {});
+const newEntries = [{ type: "message", message: { role: "user", content: "new generation mirror" } }];
+fire("turn_end", {}, {
+  sessionManager: { getSessionFile: () => `${home}/new-main.jsonl`, getEntries: () => newEntries },
+});
+
+const reportResult = await oldReport.execute(
+  "stale-report",
+  { task: "task-stale", verdict: "captain", summary: "must not append or merge" },
+  undefined,
+  undefined,
+  {},
+);
+if (!reportResult.isError) throw new Error("stale report tool was not refused");
+let bashRefused = false;
+try {
+  oldBash.__options.spawnHook({
+    command: "bin/fm-lease.sh claim task-stale --actor branch",
+    cwd: home,
+    env: {},
+  });
+} catch {
+  bashRefused = true;
+}
+if (!bashRefused) throw new Error("stale bash tool was not refused");
+if (existsSync(`${home}/state/branch-outcomes.jsonl`)) throw new Error("stale report appended an outcome");
+if (existsSync(`${home}/state/.lease-task-stale`)) throw new Error("stale bash claimed a lease");
+if (sentToMain.length !== 0) throw new Error("stale report merged a note into main");
+
+releaseMirror();
+await new Promise((resolve) => setTimeout(resolve, 25));
+if (!dispatch("signal: establish replacement branch").accepted) throw new Error("replacement wake was not accepted");
+await settle(() => (globalThis.__fmPrompts ?? []).length === 2, "replacement branch prompt");
+await settle(
+  () => (globalThis.__fmMirrors ?? []).some((message) => message.content === "[captain] new generation mirror"),
+  "replacement mirror delivery",
+);
+const cursor = JSON.parse(readFileSync(`${home}/state/.branch-mirror-cursor`, "utf8"));
+if (cursor.file !== `${home}/new-main.jsonl` || cursor.index !== 1) {
+  throw new Error(`stale mirror continuation changed the replacement cursor: ${JSON.stringify(cursor)}`);
+}
+process.exit(0);
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "stale branch boundaries must perform no side effects: $out"
+  pass "stale reports, shells, mirrors, cursors, leases, and prompts perform no side effects"
 }
 
 test_secondary_session_stays_inert() {
@@ -763,7 +886,9 @@ test_branch_cache_key_is_per_home_stable
 test_branch_gating_config_afk_and_fallback
 test_branch_mirror_filters_order_and_cursor
 test_branch_session_persists_across_process_restarts
+test_replacement_activation_cleans_leases_and_retries_failure
 test_cold_start_activates_after_lock_acquisition
 test_queued_actions_recheck_lock_ownership
+test_stale_generation_boundaries_are_side_effect_free
 test_secondary_session_stays_inert
 test_rebind_remirrors_undelivered_dialog_from_durable_cursor

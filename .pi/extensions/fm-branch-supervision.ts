@@ -260,6 +260,10 @@ export default function (pi: ExtensionAPI) {
   const pendingMirror: MirrorItem[] = [];
   const mirrorCollection: MirrorCollectionState = { collectAnchor: null, pendingCursor: null };
 
+  function generationOwnsLock(expectedGeneration: number): boolean {
+    return !shuttingDown && expectedGeneration === generation && lockOwnership() === "owned";
+  }
+
   function markLoaded(): void {
     try {
       mkdirSync(state, { recursive: true });
@@ -272,15 +276,17 @@ export default function (pi: ExtensionAPI) {
   // A replaced branch conversation must not leave its per-task leases behind
   // (the session-lock holder pid is still alive, so the sweep alone would
   // keep them). One bulk release per generation, at activation.
-  function releaseBranchLeases(): void {
+  function releaseBranchLeases(expectedGeneration: number): boolean {
+    if (!generationOwnsLock(expectedGeneration)) return false;
     try {
-      spawnSync("bash", [leaseScript, "release-actor", "--actor", "branch"], {
+      const result = spawnSync("bash", [leaseScript, "release-actor", "--actor", "branch"], {
         cwd: fmRoot,
         encoding: "utf8",
         env: { ...scriptEnv, FM_SUPERVISION_ACTOR: "branch" },
       });
+      return result.status === 0;
     } catch {
-      // Lease staleness and the loud guard refusals remain the backstop.
+      return false;
     }
   }
 
@@ -288,14 +294,15 @@ export default function (pi: ExtensionAPI) {
   // when this session owns the fleet lock right now; the first true evaluation
   // of a generation also writes the diagnostic marker and clears stray branch
   // leases from a prior generation.
-  function actingAsOwner(): boolean {
-    if (shuttingDown || lockOwnership() !== "owned") return false;
-    if (activatedGeneration !== generation) {
-      activatedGeneration = generation;
+  function actingAsOwner(expectedGeneration = generation): boolean {
+    if (!generationOwnsLock(expectedGeneration)) return false;
+    if (activatedGeneration !== expectedGeneration) {
+      if (!releaseBranchLeases(expectedGeneration)) return false;
+      if (!generationOwnsLock(expectedGeneration)) return false;
       markLoaded();
-      releaseBranchLeases();
+      activatedGeneration = expectedGeneration;
     }
-    return true;
+    return generationOwnsLock(expectedGeneration);
   }
 
   function runOutcomeScript(args: string[]): { ok: boolean; stdout: string; detail: string } {
@@ -324,7 +331,14 @@ export default function (pi: ExtensionAPI) {
   // advances once the note is handed to Pi; a crash inside Pi's own delivery
   // window leaves the outcome durable in the store, where main's
   // fm_branch_outcomes tool still reads it on demand.
-  function mergeIntoMain(seq: string, task: string, verdict: Verdict, summary: string): void {
+  function mergeIntoMain(
+    expectedGeneration: number,
+    seq: string,
+    task: string,
+    verdict: Verdict,
+    summary: string,
+  ): boolean {
+    if (!actingAsOwner(expectedGeneration)) return false;
     const note = `⎇ branch merged [${verdict}] ${task}: ${summary}`;
     const message = { customType: "fm-branch-merge", content: note, display: true };
     if (verdict === "captain") {
@@ -335,58 +349,75 @@ export default function (pi: ExtensionAPI) {
       pi.sendMessage(message, {});
     }
     if (/^[0-9]+$/.test(seq)) {
-      runOutcomeScript(["mark-read", "--through", seq]);
+      if (!actingAsOwner(expectedGeneration)) return false;
+      return runOutcomeScript(["mark-read", "--through", seq]).ok;
     }
+    return true;
   }
 
-  const reportTool: ToolDefinition = {
-    name: "fm_branch_report",
-    label: "Report supervision outcome",
-    description:
-      "Record the outcome of one handled fleet event: write it durably to the outcome store, then merge an append-only note into the captain-facing main conversation. verdict captain surfaces it to the captain in one turn; verdict routine merges silently.",
-    parameters: Type.Object({
-      task: Type.String({ description: "The task id the event belongs to (or 'fleet' for fleet-wide events)" }),
-      verdict: Type.Union([Type.Literal("routine"), Type.Literal("captain")], {
-        description: "captain only for what a human must see; routine otherwise",
+  function createReportTool(toolGeneration: number): ToolDefinition {
+    return {
+      name: "fm_branch_report",
+      label: "Report supervision outcome",
+      description:
+        "Record the outcome of one handled fleet event: write it durably to the outcome store, then merge an append-only note into the captain-facing main conversation. verdict captain surfaces it to the captain in one turn; verdict routine merges silently.",
+      parameters: Type.Object({
+        task: Type.String({ description: "The task id the event belongs to (or 'fleet' for fleet-wide events)" }),
+        verdict: Type.Union([Type.Literal("routine"), Type.Literal("captain")], {
+          description: "captain only for what a human must see; routine otherwise",
+        }),
+        summary: Type.String({
+          description:
+            "One or two sentences in captain outcome language; include the full https:// PR URL when a PR is involved",
+        }),
+        wake: Type.Optional(Type.String({ description: "The wake reason line this outcome answers" })),
       }),
-      summary: Type.String({
-        description:
-          "One or two sentences in captain outcome language; include the full https:// PR URL when a PR is involved",
-      }),
-      wake: Type.Optional(Type.String({ description: "The wake reason line this outcome answers" })),
-    }),
-    execute: async (_toolCallId, params) => {
-      const task = String((params as { task: unknown }).task || "").trim();
-      const verdictRaw = String((params as { verdict: unknown }).verdict || "");
-      const summary = String((params as { summary: unknown }).summary || "").trim();
-      const wake = String((params as { wake?: unknown }).wake ?? "").trim();
-      if (!task || !summary || (verdictRaw !== "routine" && verdictRaw !== "captain")) {
+      execute: async (_toolCallId, params) => {
+        const task = String((params as { task: unknown }).task || "").trim();
+        const verdictRaw = String((params as { verdict: unknown }).verdict || "");
+        const summary = String((params as { summary: unknown }).summary || "").trim();
+        const wake = String((params as { wake?: unknown }).wake ?? "").trim();
+        if (!task || !summary || (verdictRaw !== "routine" && verdictRaw !== "captain")) {
+          return {
+            content: [{ type: "text", text: "invalid report: task, verdict (routine|captain), and summary are required" }],
+            details: undefined,
+            isError: true,
+          };
+        }
+        const verdict = verdictRaw as Verdict;
+        const appendArgs = ["append", "--task", task, "--verdict", verdict, "--summary", summary];
+        if (wake) appendArgs.push("--wake", wake);
+        if (!actingAsOwner(toolGeneration)) {
+          return {
+            content: [{ type: "text", text: "report refused: supervision session was replaced or lost lock ownership" }],
+            details: undefined,
+            isError: true,
+          };
+        }
+        const appended = runOutcomeScript(appendArgs);
+        if (!appended.ok) {
+          return {
+            content: [{ type: "text", text: `outcome store append failed (nothing merged): ${appended.detail}` }],
+            details: undefined,
+            isError: true,
+          };
+        }
+        if (!mergeIntoMain(toolGeneration, appended.stdout, task, verdict, summary)) {
+          return {
+            content: [{ type: "text", text: `recorded seq ${appended.stdout}, but merge refused after supervision replacement or lock loss` }],
+            details: undefined,
+            isError: true,
+          };
+        }
         return {
-          content: [{ type: "text", text: "invalid report: task, verdict (routine|captain), and summary are required" }],
+          content: [{ type: "text", text: `recorded seq ${appended.stdout} and merged [${verdict}] into main` }],
           details: undefined,
-          isError: true,
         };
-      }
-      const verdict = verdictRaw as Verdict;
-      const appendArgs = ["append", "--task", task, "--verdict", verdict, "--summary", summary];
-      if (wake) appendArgs.push("--wake", wake);
-      const appended = runOutcomeScript(appendArgs);
-      if (!appended.ok) {
-        return {
-          content: [{ type: "text", text: `outcome store append failed (nothing merged): ${appended.detail}` }],
-          details: undefined,
-          isError: true,
-        };
-      }
-      mergeIntoMain(appended.stdout, task, verdict, summary);
-      return {
-        content: [{ type: "text", text: `recorded seq ${appended.stdout} and merged [${verdict}] into main` }],
-        details: undefined,
-      };
-    },
-  };
+      },
+    };
+  }
 
-  async function createBranch(): Promise<AgentSession> {
+  async function createBranch(branchGeneration: number): Promise<AgentSession> {
     const prompt = spawnSync("bash", [promptScript], {
       cwd: fmRoot,
       encoding: "utf8",
@@ -398,6 +429,7 @@ export default function (pi: ExtensionAPI) {
         `fm-branch-prompt.sh did not produce a usable branch prompt (status=${prompt.status ?? "none"}): ${(prompt.stderr || "").trim()}`,
       );
     }
+    if (!actingAsOwner(branchGeneration)) throw new Error("supervision session was replaced or lost lock ownership");
     mkdirSync(sessionsDir, { recursive: true });
     let sessionManager: SessionManager | null = null;
     try {
@@ -442,35 +474,46 @@ export default function (pi: ExtensionAPI) {
       ],
     });
     await loader.reload();
-    if (lockOwnership() !== "owned") throw new Error("supervision session no longer owns the fleet lock");
+    if (!actingAsOwner(branchGeneration)) throw new Error("supervision session was replaced or lost lock ownership");
     const leaseHolderPid = ownedLockPid;
     const bashTool = createBashToolDefinition(fmRoot, {
-      spawnHook: (context) => ({
-        ...context,
-        // Loud accidental-override guard (captain-decided): the actor
-        // variables are readonly inside the branch's own shell, so an
-        // accidental in-shell reassignment fails loudly instead of silently
-        // impersonating main. Confused-agent-grade by design; the threat
-        // model lives in bin/fm-lease-lib.sh.
-        command: `readonly FM_SUPERVISION_ACTOR FM_LEASE_HOLDER_PID
+      spawnHook: (context) => {
+        if (!actingAsOwner(branchGeneration)) {
+          throw new Error("bash refused: supervision session was replaced or lost lock ownership");
+        }
+        return {
+          ...context,
+          // Loud accidental-override guard (captain-decided): the actor
+          // variables are readonly inside the branch's own shell, so an
+          // accidental in-shell reassignment fails loudly instead of silently
+          // impersonating main. Confused-agent-grade by design; the threat
+          // model lives in bin/fm-lease-lib.sh.
+          command: `readonly FM_SUPERVISION_ACTOR FM_LEASE_HOLDER_PID
 (
 ${context.command}
 )`,
-        env: {
-          ...context.env,
-          ...scriptEnv,
-          FM_SUPERVISION_ACTOR: "branch",
-          FM_LEASE_HOLDER_PID: leaseHolderPid,
-        },
-      }),
+          env: {
+            ...context.env,
+            ...scriptEnv,
+            FM_SUPERVISION_ACTOR: "branch",
+            FM_LEASE_HOLDER_PID: leaseHolderPid,
+          },
+        };
+      },
     });
     const created = await createAgentSession({
       cwd: fmRoot,
       sessionManager,
       resourceLoader: loader,
       tools: [...BRANCH_TOOL_NAMES],
-      customTools: [bashTool as unknown as ToolDefinition, reportTool],
+      customTools: [bashTool as unknown as ToolDefinition, createReportTool(branchGeneration)],
     });
+    if (!actingAsOwner(branchGeneration)) {
+      try {
+        created.session.dispose();
+      } catch {}
+      throw new Error("supervision session was replaced or lost lock ownership");
+    }
     try {
       writeFileSync(sessionPointer, `${sessionManager.getSessionFile()}\n`);
     } catch {
@@ -479,32 +522,42 @@ ${context.command}
     return created.session;
   }
 
-  async function ensureBranch(): Promise<AgentSession> {
+  async function ensureBranch(expectedGeneration: number): Promise<AgentSession> {
+    if (!actingAsOwner(expectedGeneration)) throw new Error("supervision session was replaced or lost lock ownership");
     if (branch) return branch;
     if (branchBroken) throw new Error(branchBroken);
     try {
-      branch = await createBranch();
-      return branch;
+      const created = await createBranch(expectedGeneration);
+      if (!actingAsOwner(expectedGeneration)) {
+        try {
+          created.dispose();
+        } catch {}
+        throw new Error("supervision session was replaced or lost lock ownership");
+      }
+      branch = created;
+      return created;
     } catch (error) {
-      branchBroken = error instanceof Error ? error.message : String(error);
+      if (expectedGeneration === generation && !shuttingDown) {
+        branchBroken = error instanceof Error ? error.message : String(error);
+      }
       throw error;
     }
   }
 
-  async function flushMirror(session: AgentSession): Promise<void> {
-    if (!actingAsOwner()) throw new Error("supervision session no longer owns the fleet lock");
+  async function flushMirror(session: AgentSession, expectedGeneration: number): Promise<void> {
+    if (!actingAsOwner(expectedGeneration)) throw new Error("supervision session no longer owns the fleet lock");
     while (pendingMirror.length > 0) {
       const item = pendingMirror[0];
+      if (!actingAsOwner(expectedGeneration)) throw new Error("supervision session no longer owns the fleet lock");
       await session.sendCustomMessage(
         { customType: "fm-main-mirror", content: `[${item.tag}] ${item.text}`, display: false },
         {},
       );
-      // Remove only after the append succeeded, so a failure retries the same
-      // item in order instead of dropping it.
+      if (!actingAsOwner(expectedGeneration)) throw new Error("supervision session was replaced during mirror delivery");
       pendingMirror.shift();
     }
     if (mirrorCollection.pendingCursor) {
-      if (!actingAsOwner()) throw new Error("supervision session no longer owns the fleet lock");
+      if (!actingAsOwner(expectedGeneration)) throw new Error("supervision session no longer owns the fleet lock");
       writeMirrorCursor(mirrorCollection.pendingCursor);
       mirrorCollection.pendingCursor = null;
     }
@@ -529,9 +582,10 @@ ${context.command}
         if (shuttingDown || acceptedGeneration !== generation) {
           throw new Error("supervision session was replaced before handling the accepted wake");
         }
-        if (!actingAsOwner()) throw new Error("supervision session no longer owns the fleet lock");
-        const session = await ensureBranch();
-        await flushMirror(session);
+        if (!actingAsOwner(acceptedGeneration)) throw new Error("supervision session no longer owns the fleet lock");
+        const session = await ensureBranch(acceptedGeneration);
+        await flushMirror(session, acceptedGeneration);
+        if (!actingAsOwner(acceptedGeneration)) throw new Error("supervision session no longer owns the fleet lock");
         await session.prompt(
           `FIRSTMATE SUPERVISION WAKE: ${message}\n\nHandle this per your operating procedure and finish with fm_branch_report.`,
         );
@@ -547,10 +601,12 @@ ${context.command}
 
   function enqueueMirrorFlush(): void {
     if (!branch || pendingMirror.length === 0) return;
+    const flushGeneration = generation;
+    const flushSession = branch;
     branchChain = branchChain
       .then(async () => {
-        if (shuttingDown || !branch) return;
-        await flushMirror(branch);
+        if (!actingAsOwner(flushGeneration)) return;
+        await flushMirror(flushSession, flushGeneration);
       })
       .catch(() => {
         // Mirror items stay queued in pendingMirror on failure; the next wake
@@ -604,6 +660,7 @@ ${context.command}
     shuttingDown = false;
     branchBroken = "";
     generation += 1;
+    actingAsOwner(generation);
   });
 
   pi.on?.("session_shutdown", () => {
