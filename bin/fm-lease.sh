@@ -30,8 +30,9 @@
 #       (a lease held by a dead actor is cleared at session start); safe to
 #       run any time - a live lease is never touched.
 #
-# The default actor is $FM_SUPERVISION_ACTOR (else main); --actor overrides
-# it. Exit codes: 0 ok, 1 check-miss, 2 usage, 6 refused (other actor holds).
+# The default actor is $FM_SUPERVISION_ACTOR (else main); when --actor is
+# supplied for a mutation, it must name that calling actor. Exit codes: 0 ok,
+# 1 check-miss, 2 usage, 6 refused (other actor holds or actor mismatch).
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -104,8 +105,7 @@ case "$CMD" in
   claim)
     # Loud accidental-override guard: a claim naming the OTHER actor than the
     # caller's own injected identity is a wiring mistake, never a role change.
-    # (release deliberately allows naming the holder - that is the documented
-    # wedged-lease recovery override, and it prints what it removed.)
+    # Release and bulk release enforce the same caller authorization below.
     CALLER=$(fm_lease_actor) || exit "$FM_LEASE_REFUSE_EXIT"
     if [ "$ACTOR" != "$CALLER" ]; then
       echo "error: claim refused - the $CALLER supervision actor cannot claim a lease as $ACTOR on '$TASK'" >&2
