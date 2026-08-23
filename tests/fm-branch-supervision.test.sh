@@ -54,7 +54,7 @@ test_branch_prompt_is_byte_stable_and_above_cache_floor() {
 # --- append-only outcome store ------------------------------------------------
 
 test_outcome_store_is_append_only_with_cursor_reads() {
-  local home store snapshot seq1 seq2 unread replay
+  local home store snapshot seq1 seq2 unread replay out status
   home="$TMP_ROOT/store-home"
   mkdir -p "$home/state"
   store="$home/state/branch-outcomes.jsonl"
@@ -100,7 +100,16 @@ PY
     "$snapshot"*) ;;
     *) fail "a later append disturbed earlier store bytes" ;;
   esac
-  pass "outcome store is append-only with cursor-based unread reads and one-shot startup replay"
+
+  printf '{"seq":4' >> "$store"
+  snapshot=$(cat "$store")
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-5 --verdict captain --summary 'must remain unrecorded' 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "append accepted a malformed outcome-store tail"
+  assert_contains "$out" "malformed final record" "torn-tail refusal lost its diagnostic"
+  [ "$(cat "$store")" = "$snapshot" ] || fail "failed append changed the torn outcome store"
+  pass "outcome store is append-only and refuses sequence reuse after a torn tail"
 }
 
 # --- lease contract -----------------------------------------------------------
@@ -294,7 +303,16 @@ test_lease_liveness_binds_to_the_session_lock() {
     "main $$ "*" live") ;;
     *) fail "the current lock holder's lease did not read live: $out" ;;
   esac
-  pass "lease liveness requires the recorded pid to be the current session-lock holder"
+
+  printf '%sjunk\n' "$$" > "$home/state/.lock"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-lease.sh" check task-current) || fail "check missed the lease under a malformed lock"
+  case "$out" in
+    *" stale") ;;
+    *) fail "a malformed lock proved lease liveness: $out" ;;
+  esac
+  FM_HOME="$home" "$ROOT/bin/fm-lease.sh" sweep || fail "sweep under malformed lock failed"
+  [ ! -e "$home/state/.lease-task-current" ] || fail "sweep kept a lease proven only by a malformed lock"
+  pass "lease liveness requires an exact valid session-lock pid"
 }
 
 test_concurrent_stale_lease_claims_have_one_winner() {

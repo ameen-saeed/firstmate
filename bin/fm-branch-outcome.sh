@@ -76,8 +76,10 @@ read_cursor() {
 
 last_seq() {
   local value
+  [ -s "$STORE" ] || { printf '0\n'; return 0; }
   value=$(tail -n 1 "$STORE" 2>/dev/null | sed -n 's/^{"seq":\([0-9]*\),.*/\1/p')
-  printf '%s\n' "${value:-0}"
+  [ -n "$value" ] || return 1
+  printf '%s\n' "$value"
 }
 
 record_seq() { # <jsonl-line>
@@ -127,7 +129,12 @@ case "$CMD" in
     [ -n "$SUMMARY" ] || usage
     case "$VERDICT" in routine|captain) ;; *) usage ;; esac
     fm_lock_acquire_wait "$LOCK"
-    SEQ=$(( $(last_seq) + 1 ))
+    if ! LAST_SEQ=$(last_seq); then
+      fm_lock_release "$LOCK"
+      echo "error: refusing append because the outcome store has a malformed final record" >&2
+      exit 1
+    fi
+    SEQ=$(( LAST_SEQ + 1 ))
     printf '{"seq":%s,"epoch":%s,"task":"%s","wake":"%s","verdict":"%s","summary":"%s"}\n' \
       "$SEQ" "$(date +%s)" "$(json_escape "$TASK")" "$(json_escape "$WAKE")" \
       "$VERDICT" "$(json_escape "$SUMMARY")" >> "$STORE"

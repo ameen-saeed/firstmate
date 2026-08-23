@@ -136,8 +136,9 @@ fm_lease_live() {
   [ -n "$FM_LEASE_ACTOR" ] || return 1
   [ -n "$FM_LEASE_PID" ] || return 1
   kill -0 "$FM_LEASE_PID" 2>/dev/null || return 1
-  lock_pid=$(head -n 1 "$STATE/.lock" 2>/dev/null | tr -cd '0-9' || true)
-  [ -n "$lock_pid" ] && [ "$FM_LEASE_PID" = "$lock_pid" ]
+  lock_pid=$(head -n 1 "$STATE/.lock" 2>/dev/null || true)
+  case "$lock_pid" in ''|0|1|*[!0-9]*) return 1 ;; esac
+  [ "$FM_LEASE_PID" = "$lock_pid" ]
 }
 
 # fm_lease_clear_stale <task>: remove the lease file when it exists but is not
