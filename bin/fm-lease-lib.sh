@@ -69,7 +69,11 @@ FM_LEASE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 fm_lease_lock_helpers() {
   command -v fm_lock_acquire_wait >/dev/null 2>&1 && return 0
-  # shellcheck source=bin/fm-wake-lib.sh
+  # fm-wake-lib.sh is a canonical lint root in its own right and is already
+  # sourced directly by every caller of this lazy fallback; keep this an
+  # analysis boundary so ShellCheck's external-source traversal does not
+  # recursively duplicate that large graph for every lease-lib consumer.
+  # shellcheck source=/dev/null
   . "$FM_LEASE_LIB_DIR/fm-wake-lib.sh"
 }
 
