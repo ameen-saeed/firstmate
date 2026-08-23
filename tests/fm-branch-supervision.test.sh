@@ -136,10 +136,10 @@ test_lease_exclusivity_release_stale_and_sweep() {
   FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_LEASE_HOLDER_PID=$$ "$ROOT/bin/fm-lease.sh" claim task-1 \
     || fail "same-actor refresh was refused"
 
-  # Release by holder name; release of an unheld lease stays a silent no-op.
-  FM_HOME="$home" "$ROOT/bin/fm-lease.sh" release task-1 --actor branch || fail "release failed"
+  # Release by the calling holder; release of an unheld lease stays a silent no-op.
+  FM_HOME="$home" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-lease.sh" release task-1 --actor branch || fail "release failed"
   FM_HOME="$home" "$ROOT/bin/fm-lease.sh" check task-1 >/dev/null && fail "released lease still reported"
-  FM_HOME="$home" "$ROOT/bin/fm-lease.sh" release task-1 --actor branch || fail "idempotent release failed"
+  FM_HOME="$home" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-lease.sh" release task-1 --actor branch || fail "idempotent release failed"
 
   # A lease held by a dead process is stale: claimable by the other actor and
   # removed by the sweep, while a live lease survives the sweep.
@@ -195,7 +195,7 @@ test_mutating_scripts_refuse_the_other_actors_lease() {
 
   # The same lease refuses the BRANCH actor when MAIN holds it - the guard is
   # symmetric, not a branch-only fence.
-  FM_HOME="$home" "$ROOT/bin/fm-lease.sh" release task-held --actor branch
+  FM_HOME="$home" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-lease.sh" release task-held --actor branch
   FM_HOME="$home" FM_LEASE_HOLDER_PID=$$ "$ROOT/bin/fm-lease.sh" claim task-held --actor main \
     || fail "main fixture claim failed"
   out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-control.sh" task-held interrupt 2>&1)
@@ -412,7 +412,7 @@ test_claim_refuses_the_other_actors_name_loudly() {
 }
 
 test_release_actor_drops_only_that_actors_leases() {
-  local home
+  local home out status
   local -x PI_CODING_AGENT=true
   home="$TMP_ROOT/release-actor-home"
   mkdir -p "$home/state"
@@ -421,10 +421,22 @@ test_release_actor_drops_only_that_actors_leases() {
     || fail "branch claim failed"
   FM_HOME="$home" FM_LEASE_HOLDER_PID=$$ "$ROOT/bin/fm-lease.sh" claim task-b --actor main \
     || fail "main claim failed"
-  FM_HOME="$home" "$ROOT/bin/fm-lease.sh" release-actor --actor branch || fail "release-actor failed"
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-lease.sh" release task-b --actor main 2>&1)
+  status=$?
+  [ "$status" -eq 6 ] || fail "branch release of main lease exited $status, not 6: $out"
+  assert_contains "$out" "cannot release a lease as main" "cross-actor release refusal lost its diagnostic"
+  [ -e "$home/state/.lease-task-b" ] || fail "refused release removed main's lease"
+
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-lease.sh" release-actor --actor main 2>&1)
+  status=$?
+  [ "$status" -eq 6 ] || fail "branch release-actor of main leases exited $status, not 6: $out"
+  assert_contains "$out" "cannot release leases as main" "cross-actor bulk release refusal lost its diagnostic"
+  [ -e "$home/state/.lease-task-b" ] || fail "refused bulk release removed main's lease"
+
+  FM_HOME="$home" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-lease.sh" release-actor --actor branch || fail "release-actor failed"
   [ ! -e "$home/state/.lease-task-a" ] || fail "release-actor kept the branch lease"
   [ -e "$home/state/.lease-task-b" ] || fail "release-actor dropped main's lease"
-  pass "release-actor drops every lease of one actor and nothing else"
+  pass "release commands authorize the caller and bulk release drops only that actor's leases"
 }
 
 # --- role-partition refinements ----------------------------------------------

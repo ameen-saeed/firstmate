@@ -29,8 +29,8 @@
 #     the recorded pid must BE its current holder, so a lease left by an exited
 #     Pi session goes stale even if its pid was recycled by an unrelated
 #     process, and a non-Pi home never honors a leftover Pi lease. A lease held by the
-#     live current session but an abandoned conversation is recovered with
-#     the loud release override in the refusal message.
+#     live current session but an abandoned branch conversation is recovered
+#     by the branch extension's generation-activation cleanup.
 #
 # THREAT MODEL (deliberate, captain-decided): these guards are
 # CONFUSED-AGENT-GRADE, the same grade bin/fm-gate-refuse-lib.sh documents
@@ -172,7 +172,7 @@ fm_lease_guard() {
   lease_actor=$FM_LEASE_ACTOR
   fm_lock_release "$lock"
   [ "$lease_actor" != "$actor" ] || return 0
-  echo "error: $action refused - task '$task' is leased to the $lease_actor supervision actor (state/.lease-$task); retry after it releases, or clear a wedged lease with bin/fm-lease.sh release $task --actor $lease_actor" >&2
+  echo "error: $action refused - task '$task' is leased to the $lease_actor supervision actor (state/.lease-$task); retry after that actor releases it" >&2
   exit "$FM_LEASE_REFUSE_EXIT"
 }
 
