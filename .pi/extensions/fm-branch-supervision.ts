@@ -484,6 +484,7 @@ ${context.command}
   }
 
   async function flushMirror(session: AgentSession): Promise<void> {
+    if (!actingAsOwner()) throw new Error("supervision session no longer owns the fleet lock");
     while (pendingMirror.length > 0) {
       const item = pendingMirror[0];
       await session.sendCustomMessage(
@@ -495,6 +496,7 @@ ${context.command}
       pendingMirror.shift();
     }
     if (mirrorCollection.pendingCursor) {
+      if (!actingAsOwner()) throw new Error("supervision session no longer owns the fleet lock");
       writeMirrorCursor(mirrorCollection.pendingCursor);
       mirrorCollection.pendingCursor = null;
     }
@@ -519,6 +521,7 @@ ${context.command}
         if (shuttingDown || acceptedGeneration !== generation) {
           throw new Error("supervision session was replaced before handling the accepted wake");
         }
+        if (!actingAsOwner()) throw new Error("supervision session no longer owns the fleet lock");
         const session = await ensureBranch();
         await flushMirror(session);
         await session.prompt(

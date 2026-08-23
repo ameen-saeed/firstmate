@@ -40,8 +40,13 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-lease-lib.sh
 . "$SCRIPT_DIR/fm-lease-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 
 mkdir -p "$STATE"
+LEASE_COMMAND_LOCK="$STATE/.fm-lease-command.lock"
+fm_lock_acquire_wait "$LEASE_COMMAND_LOCK"
+trap 'fm_lock_release "$LEASE_COMMAND_LOCK"' EXIT
 
 usage() {
   echo "usage: fm-lease.sh claim|release <task> [--actor main|branch] | release-actor --actor main|branch | check <task> | sweep" >&2
@@ -115,7 +120,7 @@ case "$CMD" in
     # long-lived supervising process: FM_LEASE_HOLDER_PID when the caller
     # provides one (the Pi branch extension passes its own process pid), else
     # the session-lock holder (state/.lock is the harness pid), else this
-    # shell as a last resort so a bare test fixture still gets a live lease.
+    # shell; without a matching session lock the resulting lease is stale.
     HOLDER_PID=${FM_LEASE_HOLDER_PID:-}
     case "$HOLDER_PID" in *[!0-9]*) HOLDER_PID= ;; esac
     if [ -z "$HOLDER_PID" ]; then

@@ -25,11 +25,10 @@
 #     session-lock holder, or FM_LEASE_HOLDER_PID - see bin/fm-lease.sh), and
 #     both actors live inside that one pi process, so a dead recorded pid
 #     means the process died; the lease is cleared at the next claim, guard,
-#     or sweep. When the home has a session lock (state/.lock), liveness
-#     additionally requires the recorded pid to BE the current lock holder,
-#     so a lease left by an exited Pi session goes stale even if its pid was
-#     recycled by an unrelated process, and a non-Pi home (whose lock names
-#     its own harness) never honors a leftover Pi lease. A lease held by the
+#     or sweep. Liveness requires state/.lock and the recorded pid must BE its
+#     current holder, so a lease left by an exited Pi session goes stale even
+#     if its pid was recycled by an unrelated process, and a non-Pi home never
+#     honors a leftover Pi lease. A lease held by the
 #     live current session but an abandoned conversation is recovered with
 #     the loud release override in the refusal message.
 #
@@ -46,9 +45,9 @@
 # ACCIDENTAL override fails loudly inside the branch's own shell as well.
 #   - Guard semantics (fm_lease_guard): no lease, a same-actor lease, or a
 #     provably stale lease passes; a live lease held by the OTHER actor
-#     refuses with exit FM_LEASE_REFUSE_EXIT. A home that never runs the Pi
-#     branch never has lease files and never sets FM_SUPERVISION_ACTOR, so the
-#     guard is a no-op there - non-Pi behavior is unchanged by construction.
+#     refuses with exit FM_LEASE_REFUSE_EXIT. A home without the current Pi
+#     session lock cannot have a live lease, so the guard is a no-op there -
+#     non-Pi behavior is unchanged by construction.
 #   - Role partition (fm_lease_forbid_branch): actions MAIN alone owns -
 #     merging a PR, landing local-only work, spawning workers - refuse the
 #     branch actor outright, lease or no lease.
@@ -118,8 +117,8 @@ fm_lease_read() {
 }
 
 # fm_lease_live <task>: 0 iff a well-formed lease exists, its recorded pid is
-# alive, and - when this home has a session lock - that pid IS the current
-# lock holder (see the staleness contract above).
+# alive, and that pid IS the current session-lock holder (see the staleness
+# contract above).
 fm_lease_live() {
   local lock_pid
   fm_lease_read "$1" || return 1
@@ -127,7 +126,7 @@ fm_lease_live() {
   [ -n "$FM_LEASE_PID" ] || return 1
   kill -0 "$FM_LEASE_PID" 2>/dev/null || return 1
   lock_pid=$(head -n 1 "$STATE/.lock" 2>/dev/null | tr -cd '0-9' || true)
-  [ -z "$lock_pid" ] || [ "$FM_LEASE_PID" = "$lock_pid" ]
+  [ -n "$lock_pid" ] && [ "$FM_LEASE_PID" = "$lock_pid" ]
 }
 
 # fm_lease_clear_stale <task>: remove the lease file when it exists but is not

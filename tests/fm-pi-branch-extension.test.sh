@@ -90,6 +90,10 @@ export async function createAgentSession(options) {
     ops: [],
     disposed: false,
     async prompt(text) {
+      if (globalThis.__fmPromptGate) {
+        globalThis.__fmPromptStarted = true;
+        await globalThis.__fmPromptGate;
+      }
       session.ops.push({ kind: "prompt", text });
       (globalThis.__fmPrompts ??= []).push(text);
     },
@@ -598,6 +602,46 @@ EOF
   pass "branch activates on a cold start once the lock is acquired, never before"
 }
 
+test_queued_actions_recheck_lock_ownership() {
+  local repo home out status
+  repo="$TMP_ROOT/queued-ownership-root"
+  home="$TMP_ROOT/queued-ownership-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  out=$(PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, home, mainUserMessages }; })()`);
+const { fire, dispatch, settle, home, mainUserMessages } = globalThis.__t;
+import { existsSync, unlinkSync } from "node:fs";
+
+let releasePrompt;
+globalThis.__fmPromptGate = new Promise((resolve) => { releasePrompt = resolve; });
+if (!dispatch("signal: active wake").accepted) throw new Error("first wake was not accepted");
+await settle(() => globalThis.__fmPromptStarted === true, "blocked first prompt");
+if (!dispatch("signal: queued wake").accepted) throw new Error("queued wake was not accepted");
+const entries = [{ type: "message", message: { role: "user", content: "queued mirror must stay undelivered" } }];
+fire("turn_end", {}, {
+  sessionManager: { getSessionFile: () => `${home}/main.jsonl`, getEntries: () => entries },
+});
+unlinkSync(`${home}/state/.lock`);
+releasePrompt();
+await settle(() => mainUserMessages.length === 1, "lost-ownership fallback");
+if (!mainUserMessages[0].content.includes("FIRSTMATE WATCHER WAKE: signal: queued wake")) {
+  throw new Error(`queued wake did not fall back to main: ${mainUserMessages[0].content}`);
+}
+await new Promise((resolve) => setTimeout(resolve, 25));
+const session = globalThis.__fmSessions[0];
+if (session.ops.some((op) => op.kind === "custom")) throw new Error("queued mirror appended after lock ownership was lost");
+if (existsSync(`${home}/state/.branch-mirror-cursor`)) throw new Error("queued mirror advanced its cursor after lock ownership was lost");
+process.exit(0);
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "queued branch actions must recheck lock ownership: $out"
+  pass "queued wakes and mirrors stop mutating branch state after lock ownership is lost"
+}
+
 test_secondary_session_stays_inert() {
   local repo home out status foreign_pid
   repo="$TMP_ROOT/secondary-root"
@@ -718,5 +762,6 @@ test_branch_gating_config_afk_and_fallback
 test_branch_mirror_filters_order_and_cursor
 test_branch_session_persists_across_process_restarts
 test_cold_start_activates_after_lock_acquisition
+test_queued_actions_recheck_lock_ownership
 test_secondary_session_stays_inert
 test_rebind_remirrors_undelivered_dialog_from_durable_cursor

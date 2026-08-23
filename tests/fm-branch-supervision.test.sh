@@ -109,6 +109,7 @@ test_lease_exclusivity_release_stale_and_sweep() {
   local home out status
   home="$TMP_ROOT/lease-home"
   mkdir -p "$home/state"
+  printf '%s\n' "$$" > "$home/state/.lock"
 
   # Claim, exclusivity, same-actor refresh.
   FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_LEASE_HOLDER_PID=$$ "$ROOT/bin/fm-lease.sh" claim task-1 --actor branch \
@@ -157,6 +158,7 @@ test_mutating_scripts_refuse_the_other_actors_lease() {
   home="$TMP_ROOT/guard-home"
   root="$TMP_ROOT/guard-root"
   mkdir -p "$home/state" "$root"
+  printf '%s\n' "$$" > "$home/state/.lock"
   git init -q -b main "$root"
   git -C "$root" commit -q --allow-empty -m init
   ln -s "$ROOT/bin" "$root/bin"
@@ -243,10 +245,15 @@ test_home_without_branch_is_untouched() {
   [ -z "$(find "$home/state" -name '.lease-*' -o -name 'branch-outcomes*' -o -name '.branch-*' 2>/dev/null)" ] \
     || fail "guard layer created branch state in a home that never ran the branch"
 
-  # The guard helpers themselves: silent pass with no lease and no actor.
-  out=$(STATE="$home/state" bash -c '. "$1"; fm_lease_guard task-any "probe"; fm_lease_forbid_branch "probe"; echo silent-pass' _ "$ROOT/bin/fm-lease-lib.sh" 2>&1)
-  [ "$out" = "silent-pass" ] || fail "guard helpers were not silent in a no-branch home: $out"
-  pass "a home that never runs the branch sees no lease files, no refusals, and no new state"
+  # A stale Pi marker and recycled-but-live lease pid cannot activate leases in
+  # a no-lock Claude home; the guard removes the leftover and passes silently.
+  printf 'harness=claude\n' > "$home/state/fake.meta"
+  printf '%s\n' "$PPID" > "$home/state/.pi-branch-extension-loaded"
+  printf 'branch\t%s\t123\n' "$PPID" > "$home/state/.lease-task-reused"
+  out=$(STATE="$home/state" bash -c '. "$1"; fm_lease_guard task-reused "probe"; fm_lease_forbid_branch "probe"; echo silent-pass' _ "$ROOT/bin/fm-lease-lib.sh" 2>&1)
+  [ "$out" = "silent-pass" ] || fail "guard helpers honored a leftover Pi lease in a no-lock Claude home: $out"
+  [ ! -e "$home/state/.lease-task-reused" ] || fail "guard kept a leftover Pi lease without a session lock"
+  pass "a non-Pi no-lock home ignores stale Pi markers and leases without refusing guards"
 }
 
 # --- session-bound staleness and the loud accidental-override guard ---------
@@ -281,6 +288,43 @@ test_lease_liveness_binds_to_the_session_lock() {
   pass "lease liveness requires the recorded pid to be the current session-lock holder"
 }
 
+test_concurrent_stale_lease_claims_have_one_winner() {
+  local home fakebin real_mv branch_pid main_pid branch_status main_status
+  home="$TMP_ROOT/concurrent-lease-home"
+  fakebin="$TMP_ROOT/concurrent-lease-bin"
+  mkdir -p "$home/state" "$fakebin"
+  printf '%s\n' "$$" > "$home/state/.lock"
+  printf 'branch\t999999\t123\n' > "$home/state/.lease-task-race"
+  real_mv=$(command -v mv)
+  cat > "$fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+last=${!#}
+if [ "$last" = "$FM_TEST_LEASE_PATH" ] && mkdir "$FM_TEST_GATE.once" 2>/dev/null; then
+  : > "$FM_TEST_GATE.ready"
+  while [ ! -e "$FM_TEST_GATE.release" ]; do sleep 0.01; done
+fi
+exec "$FM_TEST_REAL_MV" "$@"
+SH
+  chmod +x "$fakebin/mv"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_LEASE_HOLDER_PID=$$ \
+    FM_TEST_REAL_MV="$real_mv" FM_TEST_LEASE_PATH="$home/state/.lease-task-race" FM_TEST_GATE="$home/state/gate" \
+    "$ROOT/bin/fm-lease.sh" claim task-race --actor branch >/dev/null 2>&1 &
+  branch_pid=$!
+  while [ ! -e "$home/state/gate.ready" ]; do sleep 0.01; done
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_SUPERVISION_ACTOR=main FM_LEASE_HOLDER_PID=$$ \
+    FM_TEST_REAL_MV="$real_mv" FM_TEST_LEASE_PATH="$home/state/.lease-task-race" FM_TEST_GATE="$home/state/gate" \
+    "$ROOT/bin/fm-lease.sh" claim task-race --actor main >/dev/null 2>&1 &
+  main_pid=$!
+  sleep 0.1
+  : > "$home/state/gate.release"
+  wait "$branch_pid"; branch_status=$?
+  wait "$main_pid"; main_status=$?
+  [ "$branch_status" -eq 0 ] || fail "first serialized lease claim failed with $branch_status"
+  [ "$main_status" -eq 6 ] || fail "concurrent lease claim also succeeded or returned $main_status"
+  pass "concurrent stale-lease claims serialize so exactly one actor succeeds"
+}
+
 test_claim_refuses_the_other_actors_name_loudly() {
   local home out status
   home="$TMP_ROOT/claim-guard-home"
@@ -298,6 +342,7 @@ test_release_actor_drops_only_that_actors_leases() {
   local home
   home="$TMP_ROOT/release-actor-home"
   mkdir -p "$home/state"
+  printf '%s\n' "$$" > "$home/state/.lock"
   FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_LEASE_HOLDER_PID=$$ "$ROOT/bin/fm-lease.sh" claim task-a --actor branch \
     || fail "branch claim failed"
   FM_HOME="$home" FM_LEASE_HOLDER_PID=$$ "$ROOT/bin/fm-lease.sh" claim task-b --actor main \
@@ -347,6 +392,7 @@ test_mutating_scripts_refuse_the_other_actors_lease
 test_main_owned_actions_refuse_the_branch_actor
 test_home_without_branch_is_untouched
 test_lease_liveness_binds_to_the_session_lock
+test_concurrent_stale_lease_claims_have_one_winner
 test_claim_refuses_the_other_actors_name_loudly
 test_release_actor_drops_only_that_actors_leases
 test_branch_cannot_force_teardown_or_directly_relaunch
