@@ -28,9 +28,11 @@
 # is idempotent: the remote leg deduplicates an exact re-run of the same
 # request onto the existing record (bin/fm-task-inbox-lib.sh), so after a lost
 # transport (ssh exit 255, completion unknown) fm-send retries the same leg
-# once itself, and re-running the send later remains safe rather than a
-# duplicate hazard; a still-unconfirmed marked request keeps its reply
-# expectation preserved for the record that may have landed.
+# once itself. A later re-run is idempotent only through the printed
+# FM_PENDING_REPLY_EXISTING_CORR=<corr> command: it preserves the same
+# correlation, body, and record, while a plain re-run mints a new correlation
+# and delivers a separate record. A still-unconfirmed marked request keeps its
+# reply expectation preserved for the record that may have landed.
 # Pending-reply bookkeeping trouble after a durable enqueue NEVER exits
 # nonzero: with the recovery marker stored the watcher reconciles it silently,
 # and with both the commit and the marker lost the send prints a distinct
@@ -302,6 +304,7 @@ fm_send_resolve_target() {  # <raw-target>
   TARGET_META=""
   TARGET_SELECTOR=""
   TARGET_REMOTE_ID=""
+  TARGET_REMOTE_HOST=""
   RESOLUTION_TRIED=""
 
   meta=$(fm_backend_meta_for_selector "$raw" "$STATE" 2>/dev/null || true)
@@ -315,6 +318,7 @@ fm_send_resolve_target() {  # <raw-target>
       EXPECTED_LABEL="fm-$id"
       TARGET_SELECTOR=1
       TARGET_REMOTE_ID=$id
+      TARGET_REMOTE_HOST=$(fm_meta_get "$meta" remote_host)
       RESOLUTION_TRIED="meta=$meta; placement=remote"
       return 0
     fi
@@ -689,6 +693,30 @@ else
     # the remote doorbell rings, best-effort. One identical retry after ssh
     # 255 is safe by that idempotence; a still-lost transport preserves a
     # marked request's reply expectation because the record may have landed.
+    REMOTE_META_LOCK=$(fm_meta_lock_path "$TARGET_META") || exit 1
+    if ! fm_task_inbox_lock_acquire "$REMOTE_META_LOCK"; then
+      if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
+        fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
+      fi
+      echo "error: steer not sent to remote secondmate $TARGET_REMOTE_ID: its parent task metadata could not be locked for final delivery validation" >&2
+      exit 1
+    fi
+    CURRENT_REMOTE_ID=
+    CURRENT_REMOTE_HOST=
+    if [ -f "$TARGET_META" ]; then
+      CURRENT_REMOTE_ID=$(fm_send_id_from_meta "$TARGET_META")
+      CURRENT_REMOTE_HOST=$(fm_meta_get "$TARGET_META" remote_host)
+    fi
+    if [ "$CURRENT_REMOTE_ID" != "$TARGET_REMOTE_ID" ] \
+      || [ -z "$CURRENT_REMOTE_HOST" ] \
+      || [ "$CURRENT_REMOTE_HOST" != "$TARGET_REMOTE_HOST" ]; then
+      fm_lock_release "$REMOTE_META_LOCK"
+      if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
+        fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
+      fi
+      echo "error: steer not sent to remote secondmate $TARGET_REMOTE_ID: its parent task retired or changed route during target resolution" >&2
+      exit 1
+    fi
     remote_rc=0
     remote_completion_unknown=0
     "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh send \
@@ -699,6 +727,7 @@ else
       "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh send \
         "$TARGET_REMOTE_ID" "$MESSAGE" < /dev/null || remote_rc=$?
     fi
+    fm_lock_release "$REMOTE_META_LOCK"
     if [ "$remote_rc" -ne 0 ] && [ "$remote_completion_unknown" -eq 1 ]; then
       if [ -n "$PENDING_REPLY_CORR" ]; then
         fm_pending_reply_mark_delivery_unknown "$STATE" "$PENDING_REPLY_CORR" || true
@@ -708,9 +737,11 @@ else
       else
         echo "error: steer to remote secondmate $TARGET_REMOTE_ID is unconfirmed (the first transport attempt had unknown completion and the retry failed). Only the correlation-reusing resend below is idempotent and lands on the same remote inbox record:" >&2
       fi
-      printf 'FM_HOME=%q ' "$FM_HOME" >&2
+      resend_home=$(cd "$FM_HOME" 2>/dev/null && pwd) || resend_home=$FM_HOME
+      printf 'FM_HOME=%q ' "$resend_home" >&2
       if [ "${FM_STATE_OVERRIDE+x}" = x ]; then
-        printf 'FM_STATE_OVERRIDE=%q ' "$STATE" >&2
+        resend_state=$(cd "$STATE" 2>/dev/null && pwd) || resend_state=$STATE
+        printf 'FM_STATE_OVERRIDE=%q ' "$resend_state" >&2
       fi
       printf 'FM_PENDING_REPLY_EXISTING_CORR=%q %q' "$PENDING_REPLY_CORR" "$SCRIPT_DIR/fm-send.sh" >&2
       for resend_arg in "${FM_SEND_ORIGINAL_ARGS[@]}"; do

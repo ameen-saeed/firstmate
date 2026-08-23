@@ -261,8 +261,11 @@ test_remote_rerun_is_idempotent() {
   # 255 (completion unknown). fm-send retries the identical leg once; the
   # idempotent remote write must land both executions on the same record.
   rc=0
-  send_env "$fb" "$home" "$ssh_log" FM_FAKE_SSH_AMBIGUOUS=1 \
-    "$SEND" rsm "please rename the metric" >"$dir/out" 2>"$dir/err" || rc=$?
+  (
+    cd "$TMP_ROOT" || exit 1
+    send_env "$fb" "${home#"$TMP_ROOT/"}" "$ssh_log" FM_FAKE_SSH_AMBIGUOUS=1 \
+      "$SEND" rsm "please rename the metric"
+  ) >"$dir/out" 2>"$dir/err" || rc=$?
   err=$(cat "$dir/err")
   [ "$rc" -ne 0 ] || fail "a twice-lost transport must not claim confirmed delivery"
   [ "$(cat "$ssh_log.count")" = 2 ] \
@@ -383,6 +386,43 @@ test_remote_send_revalidates_after_retirement_lock() {
   [ -z "$(remote_inbox_records "$rhome")" ] \
     || fail "a send re-created an orphan inbox after endpoint retirement"
   pass "remote control: send revalidates endpoint ownership under the metadata lock"
+}
+
+test_remote_send_revalidates_parent_route_after_retirement_lock() {
+  local dir fb ssh_log home rhome meta lock ready release rc sender_pid holder_pid
+  dir="$TMP_ROOT/remote-parent-retire-race"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); ssh_log="$dir/ssh.log"; : > "$ssh_log"
+  rhome=$(setup_remote_secondmate_home remote-parent-retire-race)
+  home=$(setup_remote_parent_home remote-parent-retire-race "$rhome")
+  meta="$home/state/rsm.meta"
+  lock="$home/state/.meta-rsm.lock"
+  ready="$dir/lock-ready"
+  release="$dir/release-lock"
+  FM_STATE_OVERRIDE="$home/state" bash -c '
+    . "$1"
+    fm_task_inbox_lock_acquire "$2" || exit 91
+    : > "$3"
+    while [ ! -e "$4" ]; do sleep 0.05; done
+    rm -f "$5"
+    fm_lock_release "$2"
+  ' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$lock" "$ready" "$release" "$meta" &
+  holder_pid=$!
+  while [ ! -e "$ready" ]; do kill -0 "$holder_pid" 2>/dev/null || fail "parent metadata-lock holder exited early"; sleep 0.05; done
+
+  rc=0
+  send_env "$fb" "$home" "$ssh_log" \
+    "$SEND" rsm "parent-retirement-race steer" >"$dir/out" 2>"$dir/err" &
+  sender_pid=$!
+  sleep 0.2
+  : > "$release"
+  wait "$sender_pid" || rc=$?
+  wait "$holder_pid" || fail "parent metadata-lock holder failed"
+  [ "$rc" -ne 0 ] || fail "a remote send must not enqueue after parent retirement won the metadata lock"
+  [ -z "$(remote_inbox_records "$rhome")" ] \
+    || fail "a remote send enqueued after its parent route retired"
+  [ -z "$(pending_record "$home")" ] \
+    || fail "a parent-route retirement failure left a created pending expectation"
+  pass "fm-send remote: enqueue revalidates the parent route under its metadata lock"
 }
 
 test_remote_resolve_key_closes_at_enqueue() {
@@ -581,6 +621,7 @@ test_remote_steer_lands_in_remote_inbox
 test_remote_rerun_is_idempotent
 test_remote_retry_failure_preserves_ambiguous_expectation
 test_remote_send_revalidates_after_retirement_lock
+test_remote_send_revalidates_parent_route_after_retirement_lock
 test_remote_resolve_key_closes_at_enqueue
 test_remote_slash_rides_inbox
 test_remote_real_failure_still_fails
