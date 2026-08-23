@@ -251,7 +251,7 @@ test_remote_steer_lands_in_remote_inbox() {
 }
 
 test_remote_rerun_is_idempotent() {
-  local dir fb ssh_log home rhome rc err count pend corr expected_cmd arg quoted rec ssh_before
+  local dir fb ssh_log home rhome rc err count pend corr expected_cmd arg quoted rec ssh_before resend_cmd
   dir="$TMP_ROOT/remote-idem"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); ssh_log="$dir/ssh.log"; : > "$ssh_log"
   rhome=$(setup_remote_secondmate_home remote-idem)
@@ -279,7 +279,8 @@ test_remote_rerun_is_idempotent() {
   [ "$(grep '^phase=' "$pend" | tail -1 | cut -d= -f2-)" = delivery_unknown ] \
     || fail "the preserved expectation must record unknown delivery: $(cat "$pend")"
   corr=$(fm_pending_reply_get "$pend" corr_id)
-  expected_cmd="FM_PENDING_REPLY_EXISTING_CORR=$corr"
+  printf -v quoted '%q' "$home"
+  expected_cmd="FM_HOME=$quoted FM_PENDING_REPLY_EXISTING_CORR=$corr"
   for arg in "$SEND" rsm "please rename the metric"; do
     printf -v quoted '%q' "$arg"
     expected_cmd="$expected_cmd $quoted"
@@ -305,10 +306,16 @@ test_remote_rerun_is_idempotent() {
   fm_pending_reply_set "$pend" phase delivery_unknown \
     || fail "could not restore the ambiguous expectation for the supported resend"
 
+  resend_cmd=$(tail -1 "$dir/err")
   rc=0
-  send_env "$fb" "$home" "$ssh_log" FM_PENDING_REPLY_EXISTING_CORR="$corr" \
-    "$SEND" rsm "please rename the metric" >"$dir/resend.out" 2>"$dir/resend.err" || rc=$?
-  expect_code 0 "$rc" "the printed correlation-reusing resend must succeed"
+  (
+    unset FM_HOME
+    env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_SEND_SETTLE=0 \
+      FM_SSH_BIN="$fb/fake-ssh" FM_SSH_LOG="$ssh_log" \
+      FM_SSH_COUNT="$ssh_log.count" FM_REMOTE_CODE_ROOT="$ROOT" \
+      bash -c "$resend_cmd"
+  ) >"$dir/resend.out" 2>"$dir/resend.err" || rc=$?
+  expect_code 0 "$rc" "the printed correlation-reusing resend must succeed without an inherited FM_HOME"
   count=$(find "$rhome/state/parent-route/rsm.inbox" -name '*.msg' | wc -l | tr -d ' ')
   [ "$count" = 1 ] || fail "the correlation-reusing resend must leave exactly one remote record, found $count"
   rec=$(find "$rhome/state/parent-route/rsm.inbox" -name '*.msg' | head -1)

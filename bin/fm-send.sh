@@ -708,6 +708,10 @@ else
       else
         echo "error: steer to remote secondmate $TARGET_REMOTE_ID is unconfirmed (the first transport attempt had unknown completion and the retry failed). Only the correlation-reusing resend below is idempotent and lands on the same remote inbox record:" >&2
       fi
+      printf 'FM_HOME=%q ' "$FM_HOME" >&2
+      if [ "${FM_STATE_OVERRIDE+x}" = x ]; then
+        printf 'FM_STATE_OVERRIDE=%q ' "$STATE" >&2
+      fi
       printf 'FM_PENDING_REPLY_EXISTING_CORR=%q %q' "$PENDING_REPLY_CORR" "$SCRIPT_DIR/fm-send.sh" >&2
       for resend_arg in "${FM_SEND_ORIGINAL_ARGS[@]}"; do
         printf ' %q' "$resend_arg" >&2
