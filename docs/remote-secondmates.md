@@ -169,7 +169,9 @@ FM_HOME=<primary-home> bin/fm-send.sh fm-<id> '<request>'
 ```
 
 The [`fm-send.sh` header](../bin/fm-send.sh) owns the exact delivery-status contract.
-When the verified remote endpoint accepts the text and Enter but synchronous submit confirmation remains pending, the primary reports the request as delivered rather than failed; do not resend it, because its pending-reply expectation remains armed.
+A routed request is delivered as a durable record in the remote home's steering inbox plus a best-effort doorbell, never by typing the payload into the pane; exit 0 means the record durably exists.
+An unconfirmed transport (SSH exit 255) is retried identically once and, if still unconfirmed, remains safe to re-run later, because the remote enqueue deduplicates the same request onto the same record; a marked request's pending-reply expectation is preserved for the record that may have landed.
+The remote host runs no doorbell re-ring ladder of its own; a swallowed remote doorbell surfaces through the parent's pending-reply recovery and escalation, whose recovery request rings the doorbell again when it is enqueued.
 `fm-peek.sh` and `fm-crew-state.sh` route remote-secondmate reads to the endpoint's host instead of consulting local worktree or backend state.
 An unreachable or unreadable remote read is unknown, not evidence that the endpoint is dead.
 
@@ -191,7 +193,7 @@ A shortened or changed prefix stops the relay and surfaces a continuity failure 
 
 An SSH exit status of 255 always means transport failure or unknown remote completion.
 The transport never retries automatically.
-Semantic callers preserve the route or pending request and require same-host reconciliation rather than resending an operation that may already have happened.
+Semantic callers preserve the route or pending request; an operation that is not idempotent requires same-host reconciliation rather than a blind resend, while the steering-inbox enqueue deduplicates the same request by design and is the one remote operation that may simply be run again.
 An unavailable remote home is projected as unknown and is never replaced by a local second mate.
 
 ## Backlog handoff
