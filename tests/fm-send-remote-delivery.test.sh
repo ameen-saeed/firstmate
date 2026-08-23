@@ -251,7 +251,7 @@ test_remote_steer_lands_in_remote_inbox() {
 }
 
 test_remote_rerun_is_idempotent() {
-  local dir fb ssh_log home rhome rc err count pend corr expected_cmd arg quoted rec
+  local dir fb ssh_log home rhome rc err count pend corr expected_cmd arg quoted rec ssh_before
   dir="$TMP_ROOT/remote-idem"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); ssh_log="$dir/ssh.log"; : > "$ssh_log"
   rhome=$(setup_remote_secondmate_home remote-idem)
@@ -286,6 +286,24 @@ test_remote_rerun_is_idempotent() {
   done
   assert_contains "$err" "$expected_cmd" \
     "double transport loss must print the exact correlation-reusing resend command"
+
+  fm_pending_reply_set "$pend" phase escalated \
+    || fail "could not advance the ambiguous expectation to the escalated fixture phase"
+  ssh_before=$(cat "$ssh_log.count")
+  rc=0
+  send_env "$fb" "$home" "$ssh_log" FM_PENDING_REPLY_EXISTING_CORR="$corr" \
+    "$SEND" rsm "please rename the metric" >"$dir/stale-resend.out" 2>"$dir/stale-resend.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "an explicitly requested non-reusable correlation must fail closed"
+  assert_contains "$(cat "$dir/stale-resend.err")" "refusing to mint a replacement correlation" \
+    "a stale explicit correlation must explain that no replacement was minted"
+  [ "$(cat "$ssh_log.count")" = "$ssh_before" ] \
+    || fail "a stale explicit correlation reached the remote transport"
+  [ "$(find "$home/state/pending-replies" -maxdepth 1 -type f ! -name '.*' | wc -l | tr -d ' ')" = 1 ] \
+    || fail "a stale explicit correlation minted a replacement expectation"
+  [ "$(find "$rhome/state/parent-route/rsm.inbox" -name '*.msg' | wc -l | tr -d ' ')" = 1 ] \
+    || fail "a stale explicit correlation created another remote record"
+  fm_pending_reply_set "$pend" phase delivery_unknown \
+    || fail "could not restore the ambiguous expectation for the supported resend"
 
   rc=0
   send_env "$fb" "$home" "$ssh_log" FM_PENDING_REPLY_EXISTING_CORR="$corr" \

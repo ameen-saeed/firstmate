@@ -867,8 +867,8 @@ pass "remote spawn serializes inheritance through launch publication"
 # record plus a rung doorbell - the payload is never typed into the pane. An
 # ambiguous transport (the remote leg executed, then ssh exit 255) is retried
 # identically once, and the idempotent remote write lands both executions on
-# ONE record; the send reports itself unconfirmed with resend-safe guidance,
-# and the preserved expectation resolves only after the correlated remote log
+# ONE record; the send reports itself unconfirmed with a correlation-preserving
+# resend command, and the expectation resolves only after the correlated remote log
 # delta is ingested.
 ssh_before_send=$(cat "$SSH_COUNT")
 records_before_send=$(find "$REMOTE_HOME/state/parent-route/ios.inbox" -maxdepth 1 -name '*.msg' 2>/dev/null | wc -l | tr -d ' ')
@@ -878,7 +878,7 @@ FM_FAKE_SSH_MODE=ambiguous remote_env "$ROOT/bin/fm-send.sh" fm-ios \
 send_rc=$?
 set -e
 [ "$send_rc" -ne 0 ] || fail "ambiguous remote send claimed definite delivery"
-assert_grep 'Re-running this send is safe' "$TMP_ROOT/send.err" "ambiguous remote send did not offer the safe re-run"
+assert_grep 'Only the correlation-reusing resend below is idempotent' "$TMP_ROOT/send.err" "ambiguous remote send did not state the correlation-preserving resend boundary"
 assert_no_grep 'do not resend' "$TMP_ROOT/send.err" "ambiguous remote send kept the deleted do-not-resend trap"
 ssh_after_send=$(cat "$SSH_COUNT")
 [ "$ssh_after_send" -eq $((ssh_before_send + 2)) ] \
@@ -890,6 +890,7 @@ assert_no_grep 'report the build result' "$HERDR_LOG" "the steer payload was typ
 assert_grep 'Firstmate instruction waiting' "$HERDR_LOG" "the remote doorbell never rang"
 CORR=$(newest_remote_inbox_corr)
 [ -n "$CORR" ] || fail "remote send did not carry a correlation token"
+assert_grep "FM_PENDING_REPLY_EXISTING_CORR=$CORR" "$TMP_ROOT/send.err" "ambiguous remote send did not print its correlation-reusing command"
 phase=$(grep '^phase=' "$PARENT/state/pending-replies/$CORR" | cut -d= -f2-)
 [ "$phase" = delivery_unknown ] || fail "ambiguous remote send did not preserve its pending expectation"
 printf 'done [corr=%s]: remote build passed\n' "$CORR" >> "$REMOTE_HOME/state/parent-replies.status"

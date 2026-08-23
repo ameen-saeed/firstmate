@@ -614,11 +614,21 @@ else
     # Reuse an existing correlation id for recovery resends; otherwise create a
     # durable parent expectation before delivery. Transport success never
     # resolves that expectation (see fm-pending-reply-lib.sh).
-    existing_corr=${FM_PENDING_REPLY_EXISTING_CORR:-$(fm_pending_reply_extract_corr "$MESSAGE")}
+    existing_corr_explicit=0
+    if [ "${FM_PENDING_REPLY_EXISTING_CORR+x}" = x ]; then
+      existing_corr_explicit=1
+      existing_corr=$FM_PENDING_REPLY_EXISTING_CORR
+    else
+      existing_corr=$(fm_pending_reply_extract_corr "$MESSAGE")
+    fi
     if [ -n "$existing_corr" ] \
       && fm_pending_reply_corr_reusable "$STATE" "$existing_corr" "$TARGET_TASK_ID"; then
       PENDING_REPLY_CORR=$existing_corr
     else
+      if [ "$existing_corr_explicit" = 1 ]; then
+        echo "error: explicitly requested pending-reply correlation '${existing_corr:-empty}' is not reusable for $TARGET_TASK_ID; refusing to mint a replacement correlation" >&2
+        exit 1
+      fi
       if [ -z "$TARGET_TASK_ID" ]; then
         echo "error: cannot create pending-reply expectation without a resolvable secondmate task id" >&2
         exit 1
