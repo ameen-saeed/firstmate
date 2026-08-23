@@ -52,6 +52,9 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const home = resolve(process.env.FM_HOME);
+// The live guard exercises the branch only after the captain's explicit
+// home-local autonomy grant.
+writeFileSync(`${home}/config/pi-supervision-branch`, "on\n");
 const busHandlers = new Map();
 const bus = {
   on(channel, handler) {

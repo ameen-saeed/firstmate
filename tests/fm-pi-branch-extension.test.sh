@@ -155,18 +155,22 @@ JS
 # captured main-bound messages.
 DRIVER_PRELUDE=$(cat <<'JS'
 const { spawnSync } = await import("node:child_process");
-const { mkdirSync } = await import("node:fs");
+const { mkdirSync, writeFileSync } = await import("node:fs");
 const { pathToFileURL } = await import("node:url");
 
 const home = process.env.FM_HOME;
 const realRoot = process.env.FM_ROOT_OVERRIDE;
 mkdirSync(`${home}/state`, { recursive: true });
 mkdirSync(`${home}/config`, { recursive: true });
+// Most drivers exercise an explicitly granted branch. Consent-gating cases
+// opt out so they can prove that absence itself preserves old behavior.
+if (!process.env.FM_TEST_SKIP_BRANCH_GRANT) {
+  writeFileSync(`${home}/config/pi-supervision-branch`, "on\n");
+}
 // The branch acts only for the session that owns the fleet lock; drivers own
 // it by default, while cold-start and secondary-session scenarios opt out.
 if (!process.env.FM_TEST_SKIP_LOCK) {
-  const { writeFileSync: writeLock } = await import("node:fs");
-  writeLock(`${home}/state/.lock`, `${process.pid}\n`);
+  writeFileSync(`${home}/state/.lock`, `${process.pid}\n`);
 }
 
 const busHandlers = new Map();
@@ -407,17 +411,27 @@ exit 1
 SH
   chmod +x "$broken/bin/fm-branch-prompt.sh"
   out=$(PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module 2>&1 <<'EOF'
+    FM_TEST_SKIP_BRANCH_GRANT=1 DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
-await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, settle, home }; })()`);
-const { dispatch, settle, home } = globalThis.__t;
-import { rmSync, writeFileSync } from "node:fs";
+await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, fire, settle, home }; })()`);
+const { dispatch, fire, settle, home } = globalThis.__t;
+import { existsSync, rmSync, writeFileSync } from "node:fs";
 
-// Disabled by config: today's wake-to-main path keeps the wake.
+// No autonomy grant: session activation and wake routing both preserve the
+// old path, with no branch-owned runtime state merely because Pi loaded it.
+fire("session_start", {});
+if (dispatch("signal: while unconfigured").accepted) throw new Error("unconfigured branch accepted a wake");
+if (existsSync(`${home}/state/.pi-branch-extension-loaded`)) throw new Error("unconfigured branch activated runtime state");
+
+// Empty, explicit off, and malformed values also fail closed.
+writeFileSync(`${home}/config/pi-supervision-branch`, "\n");
+if (dispatch("signal: while empty").accepted) throw new Error("empty grant accepted a wake");
 writeFileSync(`${home}/config/pi-supervision-branch`, "off\n");
 if (dispatch("signal: while disabled").accepted) throw new Error("disabled branch accepted a wake");
+writeFileSync(`${home}/config/pi-supervision-branch`, "yes\n");
+if (dispatch("signal: while malformed").accepted) throw new Error("malformed grant accepted a wake");
 
-// Away mode: the daemon owns supervision, the branch stands down.
+// Exact opt-in grants the role, but away mode still owns supervision.
 writeFileSync(`${home}/config/pi-supervision-branch`, "on\n");
 writeFileSync(`${home}/state/.afk`, "");
 if (dispatch("signal: while afk").accepted) throw new Error("branch accepted a wake during away mode");

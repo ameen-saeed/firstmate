@@ -36,13 +36,12 @@ This preference is local to each Firstmate home and is not part of secondmate in
 ## Pi supervision branch (config/pi-supervision-branch)
 
 On a Pi primary, ordinary actionable fleet wakes that pass the unchanged watcher classifier are handled by a persistent in-process supervision branch that keeps the captain's conversation clean; [docs/pi-supervision-branch.md](pi-supervision-branch.md) owns the architecture.
-The gitignored `config/pi-supervision-branch` file under the effective home controls it: absent, empty, or `on` enables the branch, and `off` disables it so every wake reaches the captain-facing conversation exactly as before the branch existed.
-This is a Pi-primary routing preference under the captain-approved architecture, not a grant of additional autonomy: the branch cannot merge a PR, land local work, or freshly spawn, and every existing captain gate remains unchanged.
-Any other value also disables the branch, failing toward today's behavior rather than guessing.
+The gitignored `config/pi-supervision-branch` file under the effective home is the captain's explicit, home-local autonomy grant: only the exact value `on` enables the branch. An absent, unreadable, empty, `off`, or otherwise unrecognized value disables it, so every wake reaches the captain-facing conversation exactly as before the branch existed and no branch-owned runtime state or lease cleanup is activated.
+The grant enables only the Pi-primary routing and bounded supervision role in the captain-approved architecture: the branch cannot merge a PR, land local work, or freshly spawn, and every existing captain gate remains unchanged.
 The file is read fresh at every wake offer, so a toggle takes effect without restarting Pi.
 Homes on any other primary harness never read this file and are entirely unaffected.
 Runtime state lives in `state/branch-outcomes.jsonl` with its `.branch-outcomes-cursor`, the persistent conversation under `state/branch-session/` with its `.branch-session` pointer and `.branch-mirror-cursor`, and per-task `state/.lease-<task>` files; `bin/fm-branch-outcome.sh` and `bin/fm-lease-lib.sh` own those formats.
-This preference is local to each Firstmate home and is not part of secondmate inherited configuration; the absent-means-enabled default applies in every home independently.
+This grant is local to each Firstmate home and is not part of secondmate inherited configuration; each home remains disabled until its captain explicitly writes `on`.
 
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
