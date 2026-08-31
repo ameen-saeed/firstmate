@@ -54,7 +54,7 @@ blind_labels() {
 # separate markers; no token the contract sentence declares may be filtered
 # out, so a reworded contract cannot grow a marker this suite stops testing.
 strip_markers() {
-  sed -nE 's/^- Strip all metadata.* including ([^.]+)\..*/\1/p' "$SKILL_MD" |
+  sed -nE 's/^- Strip all metadata.* including (.*)\..*/\1/p' "$SKILL_MD" |
     sed -E 's/[[:space:]]+and[[:space:]]+/,/g' |
     tr ',' '\n' |
     sed -E 's/^[[:space:]]+|[[:space:]]+$//g' |
