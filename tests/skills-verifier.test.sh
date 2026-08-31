@@ -1,93 +1,183 @@
 #!/usr/bin/env bash
 # Behavioral regressions for the skills-verifier loop's deterministic guarantees.
 #
-# The loop that this skill owns is orchestrated by independent pi agents, so a
-# model's prose cannot be pinned by a test. What CAN be pinned is the two rules
-# the loop treats as code, because they decide which version wins and whether a
-# judge can tell the versions apart:
-#
-#   1. the semver bump is truthful (a change class maps to exactly one bump);
-#   2. the blind-judging label assignment randomizes per round, so the A/B
-#      labels never leak which version is newer or which the verifier rewrote.
-#
-# These are encoded here as pure functions and asserted through their return
-# values, not through the prose of SKILL.md.
+# The loop this skill owns is orchestrated by independent pi agents, so a
+# model's prose cannot be pinned by a test. What CAN be pinned is the rules the
+# loop treats as code, because they decide which version wins, when negotiation
+# must stop, and whether a judge can tell the versions apart. Those rules are
+# declared in SKILL.md's contract (Phase 4's bump bullets and negotiation cap,
+# Phase 5's labeling and stripping orders); this test DERIVES its inputs from
+# that contract and executes gates keyed on the derived values, so the shipped
+# skill and this suite cannot drift apart with the suite green.
 set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-# classify_bump <change-description> -> the truthful semver class.
-# Mirrors the skill's rule: PATCH for wording/clarity, MINOR for a new bounded
-# capability, MAJOR for a behavior change, and a loud refusal otherwise.
-classify_bump() {
-  case "$1" in
-    wording | clarity | docs) echo patch ;;
-    "new capability") echo minor ;;
-    "behavior change") echo major ;;
+SKILL_MD="$ROOT/.agents/skills/skills-verifier/SKILL.md"
+assert_present "$SKILL_MD" "the shipped skill must exist for its contract to be tested"
+
+# --- inputs derived from SKILL.md's contract --------------------------------
+
+# bump_classes -> the version-bump classes Phase 4 declares, in contract order.
+bump_classes() {
+  sed -nE 's/^- \*\*(PATCH|MINOR|MAJOR)\*\* -.*/\1/p' "$SKILL_MD" | tr '[:upper:]' '[:lower:]'
+}
+
+# bump_rule_line <class> -> Phase 4's own description of that bump class.
+bump_rule_line() {
+  sed -nE "s/^- \*\*$(printf '%s' "$1" | tr '[:lower:]' '[:upper:]')\*\* - (.*)/\1/p" "$SKILL_MD"
+}
+
+# negotiation_cap -> the round cap Phase 4 declares ("capped at N suggestion
+# rounds"), as a number. Fails loudly when the contract stops declaring one.
+negotiation_cap() {
+  local word
+  word=$(sed -nE 's/.*capped at ([a-z]+) suggestion rounds.*/\1/p' "$SKILL_MD" | head -n 1)
+  case "$word" in
+    one) echo 1 ;;
+    two) echo 2 ;;
+    three) echo 3 ;;
+    four) echo 4 ;;
+    five) echo 5 ;;
     *) return 1 ;;
   esac
 }
 
-# anonymize <body-a> <body-b> -> prints two lines, "<label>:<body>".
-# Labels A and B randomly per call, and strips identity/recency markers from
-# each body so the judge never sees which version is newer or who wrote it.
+# blind_labels -> the two labels Phase 5 assigns, in contract order.
+blind_labels() {
+  sed -nE 's/^- Label the versions ([A-Z]) and ([A-Z]).*/\1 \2/p' "$SKILL_MD"
+}
+
+# strip_markers -> the metadata keys Phase 5 orders stripped ("Strip all
+# metadata ... including author, timestamp, ...").
+strip_markers() {
+  sed -nE 's/^- Strip all metadata.* including ([^.]+)\..*/\1/p' "$SKILL_MD" |
+    sed -E 's/ and .*//' |
+    tr ',' '\n' |
+    sed -E 's/^ +| +$//g' |
+    grep -E '^[a-z]+$'
+}
+
+# --- gates executed against the derived contract -----------------------------
+
+# classify_bump <change-description> -> the bump class whose own Phase 4 rule
+# line names the change; refuses change classes no declared rule covers.
+classify_bump() {
+  local class
+  while IFS= read -r class; do
+    case "$(bump_rule_line "$class")" in
+      *"$1"*) printf '%s\n' "$class"; return 0 ;;
+    esac
+  done < <(bump_classes)
+  return 1
+}
+
+# negotiation_open <round> -> whether the declared cap still admits this round.
+negotiation_open() {
+  local cap
+  cap=$(negotiation_cap) || return 1
+  [ "$1" -le "$cap" ]
+}
+
+# anonymize <body-a> <body-b> -> "<label>:<body>" lines using the derived
+# labels, assigned at random, with every derived marker stripped from each body.
 anonymize() {
-  local a b flip
-  a=$(printf '%s' "$1" | sed -E 's/^(version|author|timestamp|date):.*/<redacted>/')
-  b=$(printf '%s' "$2" | sed -E 's/^(version|author|timestamp|date):.*/<redacted>/')
+  local la lb a b flip marker strip_re
+  read -r la lb <<EOF
+$(blind_labels)
+EOF
+  strip_re="^($(
+    local first=1 marker
+    while IFS= read -r marker; do
+      [ "$first" = 1 ] || printf '|'
+      printf '%s' "$marker"
+      first=0
+    done < <(strip_markers)
+  )):"
+  a=$(printf '%s' "$1" | sed -E "s/$strip_re.*/<redacted>/")
+  b=$(printf '%s' "$2" | sed -E "s/$strip_re.*/<redacted>/")
   flip=$(( RANDOM % 2 ))
   if [ "$flip" = "0" ]; then
-    printf 'A:%s\nB:%s\n' "$a" "$b"
+    printf '%s:%s\n%s:%s\n' "$la" "$a" "$lb" "$b"
   else
-    printf 'A:%s\nB:%s\n' "$b" "$a"
+    printf '%s:%s\n%s:%s\n' "$la" "$b" "$lb" "$a"
   fi
 }
 
 # label_of <label> -> the body line out of an anonymize() pair.
 label_of() { grep "^$1:" | sed "s/^$1://"; }
 
+# --- tests -------------------------------------------------------------------
+
+test_bump_contract_declares_exactly_three_classes() {
+  local classes
+  classes=$(bump_classes | tr '\n' ' ' | sed 's/ $//')
+  expect_code "patch minor major" "$classes" "Phase 4 declares exactly PATCH, MINOR, MAJOR in order"
+  pass "the version-bump contract declares exactly three ordered classes"
+}
+
 test_version_bump_is_truthful_and_total() {
   local got
-  got=$(classify_bump wording) || fail "wording must classify"
+  got=$(classify_bump "wording") || fail "wording must classify"
   expect_code patch "$got" "wording/clarity bumps PATCH"
-  got=$(classify_bump "new capability") || fail "new capability must classify"
+  got=$(classify_bump "bounded capability") || fail "a bounded capability must classify"
   expect_code minor "$got" "a new bounded capability bumps MINOR"
-  got=$(classify_bump "behavior change") || fail "behavior change must classify"
+  got=$(classify_bump "a behavior change") || fail "a behavior change must classify"
   expect_code major "$got" "a behavior change bumps MAJOR"
   if classify_bump "completely different" >/dev/null 2>&1; then
     fail "an unsupported change class must be refused, not guessed"
   fi
-  pass "version bump classification is truthful and does not guess"
+  pass "version bump classification follows the contract and does not guess"
+}
+
+test_negotiation_cap_holds() {
+  local cap round
+  cap=$(negotiation_cap) || fail "the contract must declare a suggestion-round cap"
+  [ "$cap" -ge 1 ] || fail "the negotiation cap must admit at least one round"
+  round=1
+  while [ "$round" -le "$cap" ]; do
+    negotiation_open "$round" || fail "round $round must be admitted under a cap of $cap"
+    round=$((round + 1))
+  done
+  if negotiation_open "$round"; then
+    fail "round $round exceeds the declared cap of $cap and must be refused"
+  fi
+  pass "the negotiation admits exactly the declared rounds and refuses the next"
 }
 
 test_blind_label_randomizes_per_round() {
-  local out_a seen_ab=0 seen_ba=0
+  local la lb out_a seen_ab=0 seen_ba=0
+  read -r la lb <<EOF
+$(blind_labels)
+EOF
+  [ -n "$la" ] && [ -n "$lb" ] || fail "Phase 5 must declare two blind labels"
   for _ in $(seq 1 30); do
-    out_a=$(anonymize "body-alpha" "body-beta" | label_of A)
+    out_a=$(anonymize "body-alpha" "body-beta" | label_of "$la")
     case "$out_a" in
       "body-alpha") seen_ab=$(( seen_ab + 1 )) ;;
       "body-beta") seen_ba=$(( seen_ba + 1 )) ;;
     esac
   done
-  [ "$seen_ab" -gt 0 ] && [ "$seen_ba" -gt 0 ] || fail "A/B labels did not randomize across rounds"
-  pass "blind-judging A/B labels randomize so the newer version is not inferable from labeling"
+  [ "$seen_ab" -gt 0 ] && [ "$seen_ba" -gt 0 ] || fail "the blind labels did not randomize across rounds"
+  pass "blind-judging labels randomize so the newer version is not inferable from labeling"
 }
 
-test_blind_label_strips_identity_markers() {
-  local draft="version: 2.0.0
-author: ver-agent
+test_blind_label_strips_every_declared_marker() {
+  local draft labeled marker
+  draft="author: ver-agent
 timestamp: 2026-08-30T23:25:00Z
 body-only-content"
-  local labeled
   labeled=$(anonymize "$draft" "$draft")
-  assert_not_contains "$labeled" "version: 2.0.0" "the blind label leaks a version marker"
-  assert_not_contains "$labeled" "author: ver-agent" "the blind label leaks an author marker"
-  assert_not_contains "$labeled" "timestamp: 2026-08-30T23:25:00Z" "the blind label leaks a timestamp marker"
+  while IFS= read -r marker; do
+    assert_not_contains "$labeled" "$marker: " "the blind label leaks a declared $marker marker"
+  done < <(strip_markers)
   assert_contains "$labeled" "body-only-content" "the blind label kept the real body content"
-  pass "blind judging strips identity and recency markers from a version"
+  pass "blind judging strips every metadata marker the contract declares"
 }
 
+test_bump_contract_declares_exactly_three_classes
 test_version_bump_is_truthful_and_total
+test_negotiation_cap_holds
 test_blind_label_randomizes_per_round
-test_blind_label_strips_identity_markers
+test_blind_label_strips_every_declared_marker
