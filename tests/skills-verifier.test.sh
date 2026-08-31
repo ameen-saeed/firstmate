@@ -62,8 +62,8 @@ test_version_bump_is_truthful_and_total() {
 }
 
 test_blind_label_randomizes_per_round() {
-  local out_a i seen_ab=0 seen_ba=0
-  for i in $(seq 1 30); do
+  local out_a seen_ab=0 seen_ba=0
+  for _ in $(seq 1 30); do
     out_a=$(anonymize "body-alpha" "body-beta" | label_of A)
     case "$out_a" in
       "body-alpha") seen_ab=$(( seen_ab + 1 )) ;;
