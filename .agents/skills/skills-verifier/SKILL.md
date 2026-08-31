@@ -63,7 +63,7 @@ Record the handoff path in the run log.
 
 Commit the generator's final output before anything is iterated, and record the commit hash as the restore point.
 
-- Run `git add -A` on the draft and its direct references.
+- Run `git add -- <draft> <references>` to stage only the draft and its direct references, so unrelated worktree changes never enter the rollback anchor.
 - Commit with a message naming the version and stage, for example `skills-verifier: generator v1.0.0 draft`.
 - Tag the commit, for example `git tag skills-verifier-anchor-<slug>`.
 - Append a status note naming the tag and commit hash so the restore point survives a restart.
@@ -124,6 +124,7 @@ The decider chooses the winner, applying configured authority when present.
   Then return to the generator (or the lane) for the final accept decision.
 - **Reject** - restore the recorded rollback commit exactly.
   The restore is the anchor from phase 2, not a fresh checkout and not a discard of unlanded work.
+  When firstmate decides under configured authority, discarding unlanded negotiated work beyond the anchored commit still requires explicit captain authorization per hard rule 3.
 
 A rejected run must not leave a half-versioned draft in place.
 Restore the anchor commit and stop the loop unless the decider reopens it.
@@ -134,8 +135,11 @@ pi-peer lets independent pi sessions find and message each other.
 Install it once per machine:
 
 ```bash
-pi install git:github.com/shift-labs-ai/pi-peer
+pi install git:github.com/shift-labs-ai/pi-peer@5e8fcb20c14cc5bc99a704e5b466f22bcf553861
 ```
+
+The pinned ref is the piloted revision (v0.2.0).
+Pinning keeps the install on the verified transport instead of the mutable head.
 
 Nothing else to enable; every session registers itself on startup.
 pi-peer exposes two model-invoked tools: `list_peers` and `message_peer`.
