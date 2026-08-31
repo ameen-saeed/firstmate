@@ -104,7 +104,7 @@ phases:
     kind: agent
     owner: builder
     model: anthropic/claude-sonnet-4
-    writes: []                       # the only phase that may change source
+    writes: [src/, tests/]           # the only phase that may change source
   - name: test
     kind: code
     owner: gates                     # no agent; run the suite
@@ -118,7 +118,7 @@ phases:
     kind: agent
     owner: builder
     model: anthropic/claude-sonnet-4
-    writes: []
+    writes: [src/, tests/]           # fix touches only what build may touch
 ```
 
 The per-agent essence is the same four plus one: model, thinking, prompts, tools, and the write boundary.

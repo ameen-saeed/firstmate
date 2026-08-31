@@ -165,6 +165,7 @@ EOF
 
 test_blind_label_strips_every_declared_marker() {
   local draft labeled marker
+  [ -n "$(strip_markers)" ] || fail "SKILL.md no longer declares any strip markers, so the stripping contract cannot be tested"
   draft="author: ver-agent
 timestamp: 2026-08-30T23:25:00Z
 body-only-content"

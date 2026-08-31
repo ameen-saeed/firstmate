@@ -63,6 +63,7 @@ Record the handoff path in the run log.
 
 Commit the generator's final output before anything is iterated, and record the commit hash as the restore point.
 
+- Require a clean index before staging: `git diff --cached --quiet` must pass; if unrelated entries are already staged, stop and have the operator commit or stash them, so the anchor commit never sweeps in unrelated staged work.
 - Run `git add -- <draft> <references>` to stage only the draft and its direct references, so unrelated worktree changes never enter the rollback anchor.
 - Commit with a message naming the version and stage, for example `skills-verifier: generator v1.0.0 draft`.
 - Tag the commit, for example `git tag skills-verifier-anchor-<slug>`.
