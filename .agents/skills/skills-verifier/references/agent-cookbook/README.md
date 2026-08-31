@@ -118,7 +118,7 @@ phases:
     kind: agent
     owner: builder
     model: anthropic/claude-sonnet-4
-    writes: [src/, tests/]           # fix touches only what build may touch
+    writes: [src/, tests/]           # fix re-enters source with build's boundary; review is the only read-only phase
 ```
 
 The per-agent essence is the same four plus one: model, thinking, prompts, tools, and the write boundary.
@@ -183,7 +183,7 @@ The wrong conversion would make every phase an agent and pay for arithmetic that
 
 4. **Assign an agent per phase.**
    Give the planner a frontier model and the builder a cheaper, faster one.
-   Give a reviewer no write boundary at all.
+   Give the reviewer no writes at all (writes: []).
 
 5. **Write the config.**
    YAML only, one entry per agent, with model, thinking, prompts, harness, and the write boundary.

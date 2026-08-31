@@ -49,14 +49,16 @@ blind_labels() {
   sed -nE 's/^- Label the versions ([A-Z]) and ([A-Z]).*/\1 \2/p' "$SKILL_MD"
 }
 
-# strip_markers -> the metadata keys Phase 5 orders stripped ("Strip all
-# metadata ... including author, timestamp, ...").
+# strip_markers -> every metadata key Phase 5 orders stripped ("Strip all
+# metadata ... including author, timestamp, ..."). Commas and "and" both
+# separate markers; no token the contract sentence declares may be filtered
+# out, so a reworded contract cannot grow a marker this suite stops testing.
 strip_markers() {
   sed -nE 's/^- Strip all metadata.* including ([^.]+)\..*/\1/p' "$SKILL_MD" |
-    sed -E 's/ and .*//' |
+    sed -E 's/[[:space:]]+and[[:space:]]+/,/g' |
     tr ',' '\n' |
-    sed -E 's/^ +| +$//g' |
-    grep -E '^[a-z]+$'
+    sed -E 's/^[[:space:]]+|[[:space:]]+$//g' |
+    grep -v '^$'
 }
 
 # --- gates executed against the derived contract -----------------------------
