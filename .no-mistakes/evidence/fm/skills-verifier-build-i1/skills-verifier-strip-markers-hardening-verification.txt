@@ -1,0 +1,38 @@
+skills-verifier strip_markers hardening (target 1f16d8f) - verification transcript
+
+1) Targeted suite, current SKILL.md wording:
+$ bash tests/skills-verifier.test.sh
+ok - the version-bump contract declares exactly three ordered classes
+ok - version bump classification follows the contract and does not guess
+ok - the negotiation admits exactly the declared rounds and refuses the next
+ok - blind-judging labels randomize so the newer version is not inferable from labeling
+ok - blind judging strips every metadata marker the contract declares
+exit=0
+
+2) Regression proof: Phase 5 strip bullet reworded to contain a period-bearing
+   token ("including author, model v1.2 id, and timestamp, and any name that
+   leaks recency."), then the shipped strip_markers() (extracted verbatim from
+   tests/skills-verifier.test.sh, not re-implemented) run against it:
+
+   shipped greedy capture (.*)\.:
+   author
+   model v1.2 id
+   timestamp
+   any name that leaks recency
+
+   old capture ([^.]+)\. (pre-fix):
+   author
+   model v1
+   -> old code silently dropped "2 id", "timestamp", and
+      "any name that leaks recency"; shipped code keeps every declared token.
+
+3) End-to-end through the real anonymize() consumer with the reworded contract:
+   anonymize 'model v1.2 id: agent-2\nauthor: ver-agent\nbody-only-content' ...
+   -> A:<redacted> / <redacted> / body-only-content
+      B:<redacted> / body-only-content
+   The period-bearing marker line is stripped, body content preserved.
+
+4) Runner wiring (changed-file selection):
+   skills-verifier.test.sh -> pure-contract-unit
+   .agents/skills/skills-verifier/references/agent-cookbook/README.md -> pure-contract-unit (no __unmapped__)
+   .agents/skills/skills-verifier/SKILL.md -> pure-contract-unit
