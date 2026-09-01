@@ -327,8 +327,7 @@ seen_gate() {  # <state> <file>: 0 when every byte is already announced
 }
 prime_seen() {  # <state> <file>
   FM_STATE_OVERRIDE="$1" bash -c '
-    . "$1"; sig=$(fm_wake_signal_sig "$3") || exit 1
-    printf "%s" "$sig" > "$(fm_wake_signal_seen_path "$2" "$3")"
+    . "$1"; fm_wake_status_mark_current "$2" "$3"
   ' _ "$ROOT/bin/fm-wake-lib.sh" "$1" "$2"
 }
 
@@ -1073,8 +1072,15 @@ test_correlations_reuse_only_for_matching_open_task() {
   got=$(latest_record_body "$home" domain)
   corr1=$(fm_pending_reply_extract_corr "$got")
   export FM_PENDING_REPLY_EXISTING_CORR=$corr1
-  run_send "$fb" "$home" "$log" other "forwarded request" || fail "cross-task send failed"
+  if run_send "$fb" "$home" "$log" other "forwarded request"; then
+    fail "an explicit cross-task correlation must be refused"
+  fi
   unset FM_PENDING_REPLY_EXISTING_CORR
+  if latest_record_body "$home" other >/dev/null 2>&1; then
+    fail "a refused cross-task correlation must not enqueue a steer"
+  fi
+  run_send "$fb" "$home" "$log" other "forwarded request" \
+    || fail "fresh cross-task send failed"
   corr2=$(fm_pending_reply_extract_corr "$(latest_record_body "$home" other)")
   [ -n "$corr2" ] && [ "$corr2" != "$corr1" ] \
     || fail "cross-task send must receive a new correlation"
