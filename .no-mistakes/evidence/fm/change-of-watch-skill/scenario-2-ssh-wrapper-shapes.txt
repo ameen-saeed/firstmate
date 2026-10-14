@@ -1,0 +1,23 @@
+# Scenario 2: the skill's literal ssh-wrapped command shapes, both forms
+# (disposable ssh stand-in for the transport; real bin/fm-inbox.sh underneath)
+
+$ ssh omarchy 'cd /home/ameen/firstmate && FM_HOME=/home/ameen/firstmate bin/fm-inbox.sh note "accepted atlas"'   # single-line argument form
+queued 1792020064-xJSWHQ
+  accepted atlas
+  firstmate will pick this up at its next check.
+[exit=0]
+$ ls $PC/state/inbox
+1792020064-xJSWHQ.note
+handled
+
+$ ssh mac 'cd /Users/ameen/firstmate && FM_HOME=/Users/ameen/firstmate bin/fm-inbox.sh note -' < note2.txt   # stdin form
+queued 1792020065-EU9aMX
+  handoff: orion What: the orion second mate moves to the mac firstmate. Where: idle, no in-flight wor
+  firstmate will pick this up at its next check.
+[exit=0]
+$ ls $MAC/state/inbox
+1792020049-f6E3Qk.note
+1792020065-EU9aMX.note
+$ ls $MAC/state/.wake-queue
+1792020049	1	check	inbox:1792020049-f6E3Qk	check: captain inbox note 1792020049-f6E3Qk - accepted atlas
+1792020065	2	check	inbox:1792020065-EU9aMX	check: captain inbox note 1792020065-EU9aMX - handoff: orion What: the orion second mate moves to the mac firstmate. Where: idle, no in-flight wor

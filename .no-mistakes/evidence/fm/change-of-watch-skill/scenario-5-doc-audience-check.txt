@@ -1,0 +1,12 @@
+# Scenario 5: the real consumer of the new documentation-audiences.json entry
+
+$ bin/fm-doc-audience-check.sh
+fm-doc-audience-check: ok surfaces=93 local_links=299
+[exit=0]
+
+$ grep -c change-of-watch docs/documentation-audiences.json
+1
+
+# Adversarial: the same check with the new entry removed must FAIL (the entry is load-bearing)
+fm-doc-audience-check: unclassified: .agents/skills/change-of-watch/SKILL.md
+[exit=1]

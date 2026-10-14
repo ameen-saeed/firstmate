@@ -1,0 +1,56 @@
+# Scenario 1: handover round trip between two disposable firstmate homes
+# homes: sender(mac)=/var/folders/29/jjv5r2_x2jv3fm_3xv78zkdr0000gn/T//cow-live.ONIOns/mac-home receiver(pc)=/var/folders/29/jjv5r2_x2jv3fm_3xv78zkdr0000gn/T//cow-live.ONIOns/pc-home
+
+$ cat receiver/data/owners.md   # before flip
+atlas | mac | 2026-10-10
+$ flip owner line to pc, then:
+$ cd $REPO && FM_HOME=$RECV bin/fm-inbox.sh note - < note.txt   # step 3.3 documented stdin shape
+queued 1792020049-rRXeqk
+  handoff: atlas What: the atlas project (web app) moves to the pc firstmate. Where: green on main, PR
+  firstmate will pick this up at its next check.
+[exit=0]
+
+$ grep atlas $RECV/data/owners.md
+atlas | pc | 2026-10-15
+$ ls $RECV/state/inbox
+1792020049-rRXeqk.note
+$ ls $SENDER/state/inbox 2>&1   # sender home: no inbox at all = no self-delivery
+ls: /var/folders/29/jjv5r2_x2jv3fm_3xv78zkdr0000gn/T//cow-live.ONIOns/mac-home/state/inbox: No such file or directory
+
+$ cat $RECV/state/.wake-queue
+1792020049	1	check	inbox:1792020049-rRXeqk	check: captain inbox note 1792020049-rRXeqk - handoff: atlas What: the atlas project (web app) moves to the pc firstmate. Where: green on main, PR
+$ cat $RECV/state/inbox/<id>.note   # durable record
+id=1792020049-rRXeqk
+at=2026-10-14T23:20:49Z
+source=text
+--
+handoff: atlas
+What: the atlas project (web app) moves to the pc firstmate.
+Where: green on main, PR #41 merged; no open blockers.
+In flight: crewmate row "atlas-qa" is mid-verification of the export path.
+Open captain decisions: none right now.
+Links: https://example.invalid/atlas/pull/41
+
+$ FM_HOME=$RECV bin/fm-inbox.sh list   # receiver-side view on arrival
+1792020049-rRXeqk
+    handoff: atlas
+    What: the atlas project (web app) moves to the pc firstmate.
+    Where: green on main, PR #41 merged; no open blockers.
+    In flight: crewmate row "atlas-qa" is mid-verification of the export path.
+    Open captain decisions: none right now.
+    Links: https://example.invalid/atlas/pull/41
+$ FM_HOME=$RECV bin/fm-inbox.sh drain --ack 1792020049-rRXeqk   # skill step 4 ack
+acked 1792020049-rRXeqk
+[exit=0]
+$ ls $RECV/state/inbox/handled
+1792020049-rRXeqk.note
+
+# receiver replies 'accepted atlas' into the SENDER's inbox (documented argument shape)
+queued 1792020049-f6E3Qk
+  accepted atlas
+  firstmate will pick this up at its next check.
+[exit=0]
+$ ls $SENDER/state/inbox
+1792020049-f6E3Qk.note
+$ cat $SENDER/state/.wake-queue
+1792020049	1	check	inbox:1792020049-f6E3Qk	check: captain inbox note 1792020049-f6E3Qk - accepted atlas
