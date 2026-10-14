@@ -84,6 +84,9 @@ Check any host against it directly:
 bin/fm-on.sh <secondmate-id|ssh-alias> fm-remote-doctor.sh
 ```
 
+`fm-on.sh` resolves its route only from a remote record in `data/secondmates.md`, so a host no record names yet cannot be checked this way.
+To check or repair such a host before seeding, point `FM_DATA_OVERRIDE` at a throwaway directory whose `secondmates.md` holds one remote line naming the SSH alias, code root, and a home path that does not exist, and run the same command with that variable set; the real registry is untouched.
+
 That run is read-only.
 It prints the exact `PATH` its own entrypoint launch produced, executes its required-tool probe through the installed worker when one is available, reports where each required and optional tool resolved, then reports one line per readiness check.
 Each gap is tagged `fixable:` when `--fix` can close it or `human:` when only a person at that machine can, and every gap is followed by an `action:` line naming the exact step.
