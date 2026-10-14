@@ -1,0 +1,67 @@
+# Live drive: documented FM_DATA_OVERRIDE workaround for docs/remote-secondmates.md
+# product: /Users/ameen/.no-mistakes/worktrees/263a936a3c0b/01M4XCR9SBEPY7810R8PCYHZWX/bin/fm-on.sh (real) -> /usr/bin/ssh (real) -> /usr/sbin/sshd port 21383 (real publickey auth)
+#          -> bin/fm-remote-entrypoint.sh (real) -> bin/fm-remote-doctor.sh (real)
+# isolated: FM_SSH_BIN=/private/tmp/fm-doc-live.7sH8hm/ssh-with-config injects the throwaway ssh config /private/tmp/fm-doc-live.7sH8hm/ssh_config
+# isolated: HOME=/private/tmp/fm-doc-live.7sH8hm/local-home, FM_HOME=/private/tmp/fm-doc-live.7sH8hm/real-home (throwaway 'real' registry), FM_DATA_OVERRIDE=<throwaway registry>
+# isolated: remote roots are disposable dirs under /private/tmp/fm-doc-live.7sH8hm
+
+===== out-documented-line-doctor-probe.txt =====
+error: worker tool probe requires the remote job worker
+
+===== out-documented-line.txt =====
+Warning: Permanently added '[127.0.0.1]:21383' (ED25519) to the list of known hosts.
+error: command is not tracked by the configured remote root: fm-remote-doctor.sh
+
+===== out-empty-scope.txt =====
+error: malformed secondmate registry entry: - omarchy-host - host prep (host: omarchy-host; root: /private/tmp/fm-doc-live.7sH8hm/remote-root; home: /private/tmp/fm-doc-live.7sH8hm/remote-parent/fm-omarchy; scope: ; projects: ; added 2026-08-02)
+
+===== out-incomplete-line.txt =====
+error: malformed secondmate registry entry: - omarchy-host - host prep (host: omarchy-host; root: /private/tmp/fm-doc-live.7sH8hm/remote-root; home: /private/tmp/fm-doc-live.7sH8hm/remote-parent/fm-omarchy)
+
+===== out-local-form.txt =====
+error: no remote secondmate or SSH alias matches 'omarchy-host'
+
+===== out-missing-parent.txt =====
+error: remote home is not a safe directory
+
+===== out-other-host-only.txt =====
+error: no remote secondmate or SSH alias matches 'omarchy-host'
+
+===== real registry before/after =====
+before=352d51d3197aa7ac45781e72d7aca587731b366e64cfe3a944583e2461ce53e3
+after =352d51d3197aa7ac45781e72d7aca587731b366e64cfe3a944583e2461ce53e3
+REAL REGISTRY UNCHANGED
+mtime=Oct 14 17:32:15 2026 /private/tmp/fm-doc-live.7sH8hm/real-home/data/secondmates.md
+
+===== sshd log end (transport, auth, session commands) =====
+Server listening on 127.0.0.1 port 21383.
+Connection from 127.0.0.1 port 56152 on 127.0.0.1 port 21383
+Accepted key ED25519 SHA256:1tu25IRmAYYEzQ05lOfbAsKwrtf9h90h1VnfjwXtXhw found at /private/tmp/fm-doc-live.7sH8hm/sshd/authorized_keys:1
+Postponed publickey for ameen from 127.0.0.1 port 56152 ssh2 [preauth]
+Accepted key ED25519 SHA256:1tu25IRmAYYEzQ05lOfbAsKwrtf9h90h1VnfjwXtXhw found at /private/tmp/fm-doc-live.7sH8hm/sshd/authorized_keys:1
+Accepted publickey for ameen from 127.0.0.1 port 56152 ssh2: ED25519 SHA256:1tu25IRmAYYEzQ05lOfbAsKwrtf9h90h1VnfjwXtXhw
+BSM audit: bsm_audit_session_setup: setaudit_addr failed: Operation not permitted
+User child is on pid 77316
+Starting session: command for ameen from 127.0.0.1 port 56152 id 0
+Received disconnect from 127.0.0.1 port 56152:11: disconnected by user
+Disconnected from user ameen 127.0.0.1 port 56152
+Connection from 127.0.0.1 port 56153 on 127.0.0.1 port 21383
+Accepted key ED25519 SHA256:1tu25IRmAYYEzQ05lOfbAsKwrtf9h90h1VnfjwXtXhw found at /private/tmp/fm-doc-live.7sH8hm/sshd/authorized_keys:1
+Postponed publickey for ameen from 127.0.0.1 port 56153 ssh2 [preauth]
+Accepted key ED25519 SHA256:1tu25IRmAYYEzQ05lOfbAsKwrtf9h90h1VnfjwXtXhw found at /private/tmp/fm-doc-live.7sH8hm/sshd/authorized_keys:1
+Accepted publickey for ameen from 127.0.0.1 port 56153 ssh2: ED25519 SHA256:1tu25IRmAYYEzQ05lOfbAsKwrtf9h90h1VnfjwXtXhw
+BSM audit: bsm_audit_session_setup: setaudit_addr failed: Operation not permitted
+User child is on pid 77630
+Starting session: command for ameen from 127.0.0.1 port 56153 id 0
+Received disconnect from 127.0.0.1 port 56153:11: disconnected by user
+Disconnected from user ameen 127.0.0.1 port 56153
+Connection from 127.0.0.1 port 56154 on 127.0.0.1 port 21383
+Accepted key ED25519 SHA256:1tu25IRmAYYEzQ05lOfbAsKwrtf9h90h1VnfjwXtXhw found at /private/tmp/fm-doc-live.7sH8hm/sshd/authorized_keys:1
+Postponed publickey for ameen from 127.0.0.1 port 56154 ssh2 [preauth]
+Accepted key ED25519 SHA256:1tu25IRmAYYEzQ05lOfbAsKwrtf9h90h1VnfjwXtXhw found at /private/tmp/fm-doc-live.7sH8hm/sshd/authorized_keys:1
+Accepted publickey for ameen from 127.0.0.1 port 56154 ssh2: ED25519 SHA256:1tu25IRmAYYEzQ05lOfbAsKwrtf9h90h1VnfjwXtXhw
+BSM audit: bsm_audit_session_setup: setaudit_addr failed: Operation not permitted
+User child is on pid 78244
+Starting session: command for ameen from 127.0.0.1 port 56154 id 0
+Received disconnect from 127.0.0.1 port 56154:11: disconnected by user
+Disconnected from user ameen 127.0.0.1 port 56154
