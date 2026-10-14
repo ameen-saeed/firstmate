@@ -33,7 +33,6 @@ A `mac` owner edits the line over SSH on the `pc` host; never edit a line you do
 
 Before starting, steering, or merging anything for a project or second mate, read the table.
 Not yours: do not touch it, and forward the request to its owner as in "Captain messages" below.
-No line for the item: stop and ask the captain who owns it rather than claiming it.
 
 ## 3. Handing over
 
@@ -53,9 +52,19 @@ ssh omarchy 'cd /home/ameen/firstmate && FM_HOME=/home/ameen/firstmate bin/fm-in
 ssh mac 'cd /Users/ameen/firstmate && FM_HOME=/Users/ameen/firstmate bin/fm-inbox.sh note -' < note.txt
 ```
 
-A short single-line note may be passed as arguments instead of `-`: `bin/fm-inbox.sh note "accepted <item>"`.
+A short single-line note may be passed as arguments instead of `-`:
+
+```
+# mac -> pc
+ssh omarchy 'cd /home/ameen/firstmate && FM_HOME=/home/ameen/firstmate bin/fm-inbox.sh note "accepted <item>"'
+
+# pc -> mac
+ssh mac 'cd /Users/ameen/firstmate && FM_HOME=/Users/ameen/firstmate bin/fm-inbox.sh note "accepted <item>"'
+```
+
 `FM_HOME` selects whose `state/` and `data/` receive the note; set it explicitly to the receiver's home so the note can never land in the sender's own inbox.
-Success prints `queued <id>`; any other result means the note is not delivered, so do not flip the owner line until it is.
+The note is delivered only when the command exits 0 and prints `firstmate will pick this up at its next check.`; `queued <id>` alone is not proof, because the record can be saved without the wake.
+Step 2 already flipped the owner line before this send, so if the command exits non-zero, flip the owner line back and tell the captain.
 
 ## 4. Receiving
 
