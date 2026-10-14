@@ -1,0 +1,35 @@
+### checkout: /tmp/fm-base-bin
+### control script absence marker present: 0
+
+## Scenario A - a parent-side probe against a retired (absent) remote home must not recreate a stub
+  fm-remote-secondmate-control.sh state ios   -> rc=1 out=[error: remote home is not a seeded secondmate home]
+  home after probe: STUB-PRESENT(home,home/state,)
+
+## Scenario B - retiring that already-retired home must report already-retired and leave no stub
+  fm-remote-secondmate-control.sh retire ios  -> rc=1 out=[error: remote home is not a seeded secondmate home]
+  home after retire: STUB-PRESENT(home,home/state,)
+  VERDICT: did NOT report already-retired
+
+## Scenario C - every other control command against a retired home leaves it absent (fail-closed)
+  state ios                  rc=1   STUB-PRESENT(state_ios,state_ios/state,) out=error: remote home is not a seeded secondmate home
+  route ios                  rc=1   STUB-PRESENT(route_ios,route_ios/state,) out=error: remote home is not a seeded secondmate home
+  send ios hello             rc=1   STUB-PRESENT(send_ios_hello,send_ios_hello/state,) out=error: remote home is not a seeded secondmate home
+  key ios Escape             rc=1   STUB-PRESENT(key_ios_Escape,key_ios_Escape/state,) out=error: remote home is not a seeded secondmate home
+  capture ios 10             rc=1   STUB-PRESENT(capture_ios_10,capture_ios_10/state,) out=error: remote home is not a seeded secondmate home
+  observe ios                rc=1   STUB-PRESENT(observe_ios,observe_ios/state,) out=error: remote home is not a seeded secondmate home
+  sync ios                   rc=1   STUB-PRESENT(sync_ios,sync_ios/state,) out=error: remote home is not a seeded secondmate home
+  update ios                 rc=1   STUB-PRESENT(update_ios,update_ios/state,) out=error: remote home is not a seeded secondmate home
+  launch ios pi - - herdr    rc=1   STUB-PRESENT(launch_ios_pi_-_-_herdr,launch_ios_pi_-_-_herdr/state,) out=error: remote home is not a seeded secondmate home
+
+## Scenario D - adversarial: a non-seeded existing directory is still refused and never removed
+  retire ios -> rc=1 out=[error: remote home is not a seeded secondmate home]
+  tree after: . ./home ./home/state ./home/user-file.txt 
+  VERDICT: operator data preserved
+
+## Scenario E - adversarial: a genuinely seeded home is not short-circuited as already-retired
+  state ios -> rc=0 out=[missing]
+  tree after: . ./home ./home/.fm-secondmate-home ./home/AGENTS.md ./home/bin ./home/state ./home/state/other.meta 
+
+## Scenario F - adversarial: a symlinked home is never removed through the link
+  dangling symlink home retire ios -> rc=1 out=[mkdir: /var/folders/29/jjv5r2_x2jv3fm_3xv78zkdr0000gn/T//fm-absent-home.0eStu7/f/home: No such file or directory]
+  VERDICT: symlink preserved
