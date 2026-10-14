@@ -46,6 +46,12 @@ REMOTE_HERDR_SESSION=fm-remote
 TARGET_HOME_ABSENT=0
 if [ ! -e "$TARGET_HOME" ] && [ ! -L "$TARGET_HOME" ]; then TARGET_HOME_ABSENT=1; fi
 
+cleanup_absent_home_stub() {
+  [ "$TARGET_HOME_ABSENT" -eq 1 ] || return 0
+  rmdir "$TARGET_HOME/state" "$TARGET_HOME" 2>/dev/null || true
+}
+trap cleanup_absent_home_stub EXIT
+
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh

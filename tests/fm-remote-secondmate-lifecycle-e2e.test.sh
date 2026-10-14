@@ -1244,6 +1244,9 @@ if ! wait "$teardown_pid"; then
 fi
 assert_absent "$REMOTE_HOME" "remote retirement did not remove the remote home"
 assert_absent "$PARENT/state/ios.meta" "remote retirement did not remove parent metadata"
+# A parent-side probe against the retired home must not recreate a stub home.
+FM_HOME="$REMOTE_HOME" "$ROOT/bin/fm-remote-secondmate-control.sh" state ios >/dev/null 2>&1 || true
+assert_absent "$REMOTE_HOME" "a probe against the retired remote home recreated a stub"
 retire_again=$(FM_HOME="$REMOTE_HOME" "$ROOT/bin/fm-remote-secondmate-control.sh" retire ios 2>&1) \
   || fail "retiring an already-retired remote home failed: $retire_again"
 case "$retire_again" in *already-retired*) ;; *) fail "second retirement did not report already-retired: $retire_again" ;; esac
