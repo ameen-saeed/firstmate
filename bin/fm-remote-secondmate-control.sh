@@ -41,6 +41,10 @@ TARGET_HOME=${FM_HOME:?FM_HOME is required}
 CONTROL_STATE="$TARGET_HOME/state/parent-route"
 CONTROL_DATA="$TARGET_HOME/data/.parent-route"
 REMOTE_HERDR_SESSION=fm-remote
+# Sourcing the libraries below creates $TARGET_HOME/state, so record absence first;
+# otherwise an already-retired home is indistinguishable from an unseeded one.
+TARGET_HOME_ABSENT=0
+if [ ! -e "$TARGET_HOME" ] && [ ! -L "$TARGET_HOME" ]; then TARGET_HOME_ABSENT=1; fi
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
@@ -55,7 +59,7 @@ validate_id() { case "$1" in ''|*[!A-Za-z0-9._-]*) die "invalid secondmate id: $
 
 validate_home() { # <id> [allow-absent]
   local id=$1 allow_absent=${2:-no} marker
-  if [ ! -e "$TARGET_HOME" ] && [ ! -L "$TARGET_HOME" ] && [ "$allow_absent" = yes ]; then return 2; fi
+  if [ "$TARGET_HOME_ABSENT" -eq 1 ] && [ "$allow_absent" = yes ]; then return 2; fi
   [ -d "$TARGET_HOME" ] && [ ! -L "$TARGET_HOME" ] || die "remote secondmate home is unavailable or unsafe"
   [ -f "$TARGET_HOME/.fm-secondmate-home" ] && [ ! -L "$TARGET_HOME/.fm-secondmate-home" ] \
     || die "remote home is not a seeded secondmate home"
@@ -304,6 +308,8 @@ cmd_retire() {
   validate_id "$id"
   validate_home "$id" yes || rc=$?
   if [ "${rc:-0}" -eq 2 ]; then
+    # Drop only the empty directories sourcing the libraries created.
+    rmdir "$TARGET_HOME/state" "$TARGET_HOME" 2>/dev/null || true
     printf 'already-retired: %s\n' "$id"
     return 0
   fi

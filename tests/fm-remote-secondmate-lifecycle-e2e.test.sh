@@ -1220,6 +1220,10 @@ while [ ! -f "$TMP_ROOT/launch.entered" ]; do
   [ "$launch_wait" -le 1500 ] || fail "remote respawn never reached its blocked launch"
   sleep 0.02
 done
+# An unrelated record sorting after every ios record must not fail the cleanup
+# and must survive it.
+UNRELATED_PENDING="$PARENT/state/pending-replies/zzzz-unrelated"
+printf 'schema=fm-pending-reply.v1\ncorr_id=zzzz-unrelated\ntask_id=other\nphase=resolved\n' > "$UNRELATED_PENDING"
 remote_env "$ROOT/bin/fm-teardown.sh" ios > "$TMP_ROOT/teardown-serialized.out" 2>&1 &
 teardown_pid=$!
 sleep 0.2
@@ -1240,9 +1244,14 @@ if ! wait "$teardown_pid"; then
 fi
 assert_absent "$REMOTE_HOME" "remote retirement did not remove the remote home"
 assert_absent "$PARENT/state/ios.meta" "remote retirement did not remove parent metadata"
+retire_again=$(FM_HOME="$REMOTE_HOME" "$ROOT/bin/fm-remote-secondmate-control.sh" retire ios 2>&1) \
+  || fail "retiring an already-retired remote home failed: $retire_again"
+case "$retire_again" in *already-retired*) ;; *) fail "second retirement did not report already-retired: $retire_again" ;; esac
+assert_absent "$REMOTE_HOME" "second retirement left a stub remote home"
 assert_absent "$PARENT/state/.backlog-handoff-ios.wake-pending" \
   "remote retirement left receiver wake state that could poison a replacement route"
 assert_absent "$retired_wake_rec" "remote retirement left the retired receiver wake correlation"
+assert_present "$UNRELATED_PENDING" "remote retirement removed another task's pending reply"
 assert_no_grep '- ios ' "$PARENT/data/secondmates.md" "remote retirement did not remove the registry route"
 jq -e --arg workspace "$SIBLING_WORKSPACE" --arg pane "$SIBLING_PANE" '
   any(.workspaces[]; .workspace_id == $workspace and .label == "2ndmate-macos")
