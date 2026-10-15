@@ -70,6 +70,7 @@ Step 2 already flipped the owner line before this send, so if the command exits 
 
 Read the note when its `check: captain inbox note` wake arrives, then acknowledge it with `bin/fm-inbox.sh drain --ack <id>`.
 Reply `accepted <item>` into the sender's inbox with the same command shape, then take over the item.
+Re-file each open captain decision listed in the note as your own hold in your home with `bin/fm-captain-hold.sh hold <task-id> --reason <reason>`; the sender then closes its own copy as `handed over to <receiver>` through `bin/fm-captain-hold.sh answer <task-id> --decision-file <path>` with the file stating the handover, so the captain's later answer goes to you.
 The owner line is already flipped by the sender; confirm it names you before acting.
 Anything unclear: ask back through the sender's inbox with a note starting `question: <item>`; never guess.
 
@@ -81,4 +82,4 @@ A request for something you do not own is forwarded to the owner as a note start
 ## 6. Second mates
 
 A second mate moves with its owner.
-Use the normal retire-then-reseed path from `secondmate-provisioning`: retire it in the old home, seed it in the new home, then hand over per step 3.
+Use the normal retire-then-reseed path from `secondmate-provisioning`: retire it in the old home, seed it in the new home, then hand over per step 3, moving its held captain calls the same way as part of that handover.
