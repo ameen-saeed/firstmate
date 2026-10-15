@@ -71,6 +71,7 @@ Step 2 already flipped the owner line before this send, so if the command exits 
 Read the note when its `check: captain inbox note` wake arrives, then acknowledge it with `bin/fm-inbox.sh drain --ack <id>`.
 Reply `accepted <item>` into the sender's inbox with the same command shape, then take over the item.
 Re-file each open captain decision listed in the note as your own hold in your home with `bin/fm-captain-hold.sh hold <task-id> --title <title> --reason <reason>`, adding the decision's deferral date as `--until <date>` when the note carries one; the sender then closes its own copy as `handed over to <receiver>` through `bin/fm-captain-hold.sh answer <task-id> --decision-file <path>` with the file stating the handover, so the captain's later answer goes to you.
+When that re-file is refused because the task id is already closed, re-file under `<id>-<handover date>` and name that id in the accept reply; the sender closes its own copy only after the accept reply confirms the re-file.
 The owner line is already flipped by the sender; confirm it names you before acting.
 Anything unclear: ask back through the sender's inbox with a note starting `question: <item>`; never guess.
 
