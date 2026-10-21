@@ -1,0 +1,15 @@
+# Pre-fix reproduction (same daemon with the seed_status_seen_markers startup call removed)
+
+=== A: fresh daemon start over long finished-task history; daemon markers absent ===
+  fixture: old-t1.status 1335B of mixed failures/decisions over 12 rounds; old-t2.status finished weeks ago; main session's cursor + watcher markers present; no daemon seen markers
+  [first] a digest WAS injected within 14s
+  [after-start] the newly appended blocked line WAS escalated
+  escalations naming pre-existing history: 12
+  escalations naming the finished task's old decision: 1
+  escalations naming the post-start blocker: 1
+  case dir: /tmp/fm-live-evid-base.7v2s62/A-fresh-start-absent-marker
+RESULTS FILE: /tmp/fm-live-evid-base.7v2s62/results.txt
+
+## The first digest injected by the pre-fix daemon (the reported symptom)
+
+⁣FIRSTMATE_OP: v1 away-supervisor: Supervisor escalate (       2 event(s)): old-t1.status: failed: old failure 1 ; failed: old failure 2 ; failed: old failure 3 ; failed: old failure 4 ; failed: old failure 5 ; failed: old failure 6 ; failed: old failure 7 ; failed: old failure 8 ; failed: old failure 9 ; failed: old failure 10 ; failed: old failure 11 ; failed: old failure 12 (catch-all scan) | old-t2.status: needs-decision [key=oldq]: old question from three weeks ago (catch-all scan) (pre-read; re-arm not needed — watcher daemon-managed)

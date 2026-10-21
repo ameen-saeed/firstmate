@@ -1,0 +1,21 @@
+# Injected digests actually typed into the supervisor pane (fixed daemon)
+
+## Case A (fresh start, absent marker, main-session state realistic) - the whole 14s window after start
+No digest at all: nothing appended since the last presentation, so nothing escalated.
+Then one new blocked line was appended; the only injected digest was:
+
+⁣FIRSTMATE_OP: v1 away-supervisor: Supervisor escalate (       1 event(s)): old-t1.status: blocked [key=new1]: brand new blocker after start (catch-all scan) (pre-read; re-arm not needed — watcher daemon-managed)
+[ENTER]
+⁣FIRSTMATE_OP: v1 away-supervisor: Supervisor escalate (       1 event(s)): old-t1.status: blocked [key=new1]: brand new blocker after start (catch-all scan) (pre-read; re-arm not needed — watcher daemon-managed)
+[ENTER]
+
+## Case B (marker present but unclassified) - the only injected digest
+
+⁣FIRSTMATE_OP: v1 away-supervisor: Supervisor escalate (       1 event(s)): old-t1.status: failed: brand new failure after start (catch-all scan) (pre-read; re-arm not needed — watcher daemon-managed)
+[ENTER]
+⁣FIRSTMATE_OP: v1 away-supervisor: Supervisor escalate (       1 event(s)): old-t1.status: failed: brand new failure after start (catch-all scan) (pre-read; re-arm not needed — watcher daemon-managed)
+[ENTER]
+
+## Case D (main session's presentation cursor mid-file) - the only injected digest
+
+⁣FIRSTMATE_OP: v1 away-supervisor: Supervisor escalate (       1 event(s)): old-t1.status: failed: appended after the last presentation, never shown to anyone (catch-all scan) (pre-read; re-arm not needed — watcher daemon-managed)

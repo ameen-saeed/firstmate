@@ -1,0 +1,53 @@
+# Live away-mode daemon: fresh-start status history bounding
+
+Entry point driven: bin/fm-afk-start.sh (the common away-mode daemon start that bin/fm-afk-launch.sh also runs), against a disposable FM_HOME/fake tmux pane in /tmp/fm-live-final.hldQTD.
+Escalations are the real product surface: the digest text actually typed into firstmate's pane.
+
+=== A: fresh daemon start over long finished-task history; daemon markers absent ===
+  fixture: old-t1.status 1335B of mixed failures/decisions over 12 rounds; old-t2.status finished weeks ago; main session's cursor + watcher markers present; no daemon seen markers
+  [first] no digest within 14s (nothing new to escalate)
+  [after-start] the newly appended blocked line WAS escalated
+  escalations naming pre-existing history: 0
+  escalations naming the finished task's old decision: 0
+  escalations naming the post-start blocker: 1
+  case dir: /tmp/fm-live-final.hldQTD/A-fresh-start-absent-marker
+=== B: fresh daemon start whose seen marker exists but holds no classified position ('-') ===
+  fixture: marker v2<TAB>unverifiable<TAB>- plus realistic main-session state
+  [first] no digest within 14s (nothing new to escalate)
+  [after-start] the newly appended failed line WAS escalated
+  escalations naming pre-existing history: 0
+  escalations naming the post-start failure: 1
+  case dir: /tmp/fm-live-final.hldQTD/B-unclassified-marker
+=== D: fresh daemon start resumes at the main session's recorded presentation offset ===
+  fixture: presented through byte 1335 of 1403B, one later line never presented
+  [first] a digest WAS injected within 16s
+  escalations naming the never-presented line: 1
+  escalations naming already-presented history: 0
+  case dir: /tmp/fm-live-final.hldQTD/D-presentation-cursor
+=== E: a marker that already holds a classified position is left unchanged ===
+  fixture: daemon marker classified through byte 32, then an unclassified tail
+  [first] a digest WAS injected within 16s
+  escalations naming the unclassified tail: 1
+  escalations naming the already-classified line: 0
+  case dir: /tmp/fm-live-final.hldQTD/E-classified-position
+=== F (adversarial): malformed presentation cursor must not silently skip unread history ===
+  fixture: cursor row with a non-numeric offset
+  [first] a digest WAS injected within 16s
+  escalations naming unread history (must be > 0, i.e. re-read rather than lost): 12
+  case dir: /tmp/fm-live-final.hldQTD/F-unusable-cursor
+=== G4 (adversarial): marker unreadable while the seeder runs, readable when the scan runs ===
+  fixture: aa-target marker holds classified byte 32 and is chmod 0200; tail appended; scan held off by FM_HEARTBEAT_SCAN_SECS=3600
+  seeding finished; repairing the aa-target marker mode and releasing the scan
+  aa-target marker now: 32@strong:16777229:315670730:1792545794.932517063
+  [first] a digest WAS injected within 20s
+  escalations naming the unread tail (must be > 0, i.e. not skipped): 1
+  escalations naming the already-classified line: 0
+  case dir: /tmp/fm-live-final.hldQTD/G4-marker-unreadable-during-seeding
+=== H: fresh daemon start with no marker and no cursor anywhere bounds at end-of-file ===
+  fixture: long history, no daemon marker, no presentation cursor, no watcher marker
+  [first] no digest within 14s (nothing new to escalate)
+  [after-start] the newly appended failed line WAS escalated
+  escalations naming pre-existing history: 0
+  escalations naming the post-start line: 1
+  case dir: /tmp/fm-live-final.hldQTD/H-eof-fallback
+RESULTS FILE: /tmp/fm-live-final.hldQTD/results.txt

@@ -1,0 +1,13 @@
+# tests/fm-daemon.test.sh - full colocated daemon suite (targeted validation of this change)
+
+command: bash tests/fm-daemon.test.sh
+result: 130 ok, 0 not ok
+
+## The seven tests added by this change
+ok - a fresh daemon start bounds an unmarked status history and still escalates new lines
+ok - a fresh daemon start bounds a status history whose marker was never classified
+ok - a fresh daemon start resumes at the main session's presentation cursor
+ok - a fresh daemon start leaves a marker with a classified position alone
+ok - a fresh daemon start leaves a marker it cannot read alone
+ok - a fresh daemon start leaves a status log alone when the presentation cursor is unusable
+ok - a real daemon start bounds existing status history and still escalates later lines

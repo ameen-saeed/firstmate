@@ -1,0 +1,47 @@
+# Adversarial differential for the two guard fixes in this change
+
+Each pair runs the same fixture and the same live entry point against (a) this change and
+(b) a disposable copy of this change with exactly one guard removed. Only the guard differs.
+
+## F: presentation cursor present but unusable (malformed row)
+Removed guard: the '|| continue' after status_presentation_cursor_offset.
+--- (a) with the guard (this change) ---
+=== F (adversarial): malformed presentation cursor must not silently skip unread history ===
+  fixture: cursor row with a non-numeric offset
+  [first] a digest WAS injected within 16s
+  escalations naming unread history (must be > 0, i.e. re-read rather than lost): 12
+  case dir: /tmp/fm-live-final.hldQTD/F-unusable-cursor
+
+--- (b) guard removed ---
+=== F (adversarial): malformed presentation cursor must not silently skip unread history ===
+  fixture: cursor row with a non-numeric offset
+  [first] no digest within 16s (nothing new to escalate)
+  escalations naming unread history (must be > 0, i.e. re-read rather than lost): 0
+  case dir: /tmp/fm-live-nocursor.1mC67l/F-unusable-cursor
+=== F (adversarial): malformed presentation cursor must not silently skip unread history ===
+  fixture: cursor row with a non-numeric offset
+  [first] no digest within 16s (nothing new to escalate)
+  escalations naming unread history (must be > 0, i.e. re-read rather than lost): 0
+  case dir: /tmp/fm-live-nocursor.1mC67l/F-unusable-cursor
+
+## G4: seen marker unreadable while the seeder runs, readable again before the scan
+Removed guard: the block that skips seeding when the marker exists but is unreadable.
+--- (a) with the guard (this change) ---
+=== G4 (adversarial): marker unreadable while the seeder runs, readable when the scan runs ===
+  fixture: aa-target marker holds classified byte 32 and is chmod 0200; tail appended; scan held off by FM_HEARTBEAT_SCAN_SECS=3600
+  seeding finished; repairing the aa-target marker mode and releasing the scan
+  aa-target marker now: 32@strong:16777229:315639520:1792545114.442777176
+  [first] a digest WAS injected within 20s
+  escalations naming the unread tail (must be > 0, i.e. not skipped): 1
+  escalations naming the already-classified line: 0
+  case dir: /tmp/fm-live-g4head.wtSQDr/G4-marker-unreadable-during-seeding
+
+--- (b) guard removed (the marker is rewritten at end-of-file and the unread tail is lost) ---
+=== G4 (adversarial): marker unreadable while the seeder runs, readable when the scan runs ===
+  fixture: aa-target marker holds classified byte 32 and is chmod 0200; tail appended; scan held off by FM_HEARTBEAT_SCAN_SECS=3600
+  seeding finished; repairing the aa-target marker mode and releasing the scan
+  aa-target marker now: v2	r1:3734007374726f6e673a31363737373232393a3331353634373038333a313739323534353238322e33323939343839303400526567756c61722046696c653a313030363434002d007265616461626c65007265616461626c65	74@strong:16777229:315647083:1792545282.329948904
+  [first] no digest within 20s (nothing new to escalate)
+  escalations naming the unread tail (must be > 0, i.e. not skipped): 
+  escalations naming the already-classified line: 
+  case dir: /tmp/fm-live-g4var.owxgMQ/G4-marker-unreadable-during-seeding
